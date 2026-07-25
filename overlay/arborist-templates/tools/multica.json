@@ -1,0 +1,15 @@
+{
+  "name": "multica",
+  "description": "任务台账 / issue 追踪：Trellis 任务与 issue 同步、WIMTB 上台账",
+  "kind": "cli",
+  "invoke": {
+    "cli": "multica issue|project <subcommand> --output json"
+  },
+  "scope": "global",
+  "requirement": "optional",
+  "install": "`multica setup` / `multica login`",
+  "fallback": "台账退化为本地 .trellis/tasks/ 目录 + sendbox 交办；WIMTB 退化为本地留档，不上台账",
+  "availability": "`multica auth status` 通过",
+  "auth": "`multica login`；workspace 经 env `MULTICA_WORKSPACE_ID`；凭据不入表",
+  "notes": "<workspace/project 具体 ID 进这里，不进 guide>；只读候选：issue get/list/search/runs/run-messages、project get/list；Trellis 接点：config.yaml hooks after_start/after_archive → scripts/trellis_multica_sync.py"
+}

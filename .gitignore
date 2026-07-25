@@ -1,0 +1,33 @@
+# Scratch / temp
+/tmp/
+*.tmp
+*.log
+*.bak
+
+# Editor / OS junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Local harness history (never part of the template repo)
+.harness-vcs/
+
+# Dogfood / instance-adoption artifacts — when Arborist is adopted into its own repo
+# (or `trellis init` is run here), these are instance state, NOT template content,
+# and must never be committed to the public template repo. Adopters generate their own.
+# Kept in sync with adopt.sh's .git/info/exclude block.
+.trellis/
+AGENTS.md
+.claude/
+.mcp.json
+.codegraph/
+.work_context/
+.arborist/
+
+# Internal, per-machine sidecars — versioned via hgit, never the public repo.
+# (e.g. consumer/model-scoped refine profiles that reference private instances)
+refine-candidate-*.md

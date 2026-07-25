@@ -1,0 +1,13 @@
+{
+  "name": "<tool-name>",
+  "description": "<它能给你什么能力>",
+  "kind": "service-http | cli | mcp",
+  "invoke": { "<方式>": "<endpoint / 命令 / MCP server 名>" },
+  "scope": "global | project",
+  "requirement": "required | optional",
+  "install": "<怎么安装/启用>",
+  "fallback": "<缺席/拒装时的兜底行为>",
+  "availability": "<只读探测命令 / 端口 / 进程>",
+  "auth": "<鉴权方式 flag 名；凭据不入表>",
+  "notes": "<属主 / 版本 / 副作用警示>"
+}

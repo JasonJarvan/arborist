@@ -1,0 +1,13 @@
+{
+  "name": "example-impler",
+  "role": "impler",
+  "brand": "claude-code",
+  "description": "示例条目：一个 impler 会话，负责实现一个可独立验证的交付。",
+  "task": ".trellis/tasks/<mm-dd>-<task-slug>",
+  "project": {
+    "path": "/absolute/path/to/example-repo",
+    "project_id": "b5538efa9699"
+  },
+  "created": "2026-01-01T00:00:00Z",
+  "lineage": 1
+}

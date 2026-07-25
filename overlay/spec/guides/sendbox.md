@@ -1,0 +1,66 @@
+# Sendbox：跨 session 定向交办（<project> host 配置 + 信规范）
+
+> 角色间（L4 RootOrche / L3 SubOrche / L2 Impler / L1 subagent）的异步文件交办。操作用 **`sendbox-protocol` skill**（handoff/inherit verbs）；本篇是 <project> 宿主配置 + **信的命名/frontmatter 规范**。吸纳自 HarnessStack longterm § Cross-Session Sendbox Convention。
+
+## 目录结构（`toAgent/` + `toHuman/`）
+```
+.work_context/sendbox/
+  toAgent/          # 收件人是 agent 角色
+    toRootOrche/
+    toSubOrche/
+    toImpler/
+  toHuman/          # 收件人是人
+    toUser/
+    toTestTeam/
+```
+- `<Role>`/`<Receiver>` 是**角色/职能**，非 session 名（session 短命、角色不）。
+- 都在 `.work_context/`（git-ignored → 本地；副仓 `hgit` 记历史）。
+
+## 信命名规范
+`from-<task>-<type>.md` —— `<task>` = 来源 L2/L3 task 的 slug；`<type>` ∈
+`handoff`（派活）· `done`（交付回报）· `ack`（确认）· `blocker`（阻塞）· `greenlight`（放行请求）· `plan-ready`（计划待评审）· `decisions`（决策记录）· `smoke`（人工 smoke 手册）。
+例：`toAgent/toImpler/from-eve-42-handoff.md`、`toHuman/toUser/from-eve-42-greenlight.md`。
+
+## Frontmatter 规范
+**单收件人 + 瞬态**信可省 frontmatter（默认 burn，收件人 lifecycle 结束即 `rm`）。**多收件人 / durable** 信**必须**带：
+```yaml
+---
+recipients:
+  - role: <Impler|SubOrche|RootOrche|User|TestTeam>
+    purpose: <为何读这封>
+    lifecycle: <终止条件，如 "L2 started" / "signed off">
+on_lifecycle_end: burn | archive | wimtb   # wimtb=蒸馏进对应 Multica issue 后 rm
+task: <L2/L3 task 目录>
+multica_issue: <task.json.meta.multica_issue，如有>
+created: <YYYY-MM-DD>
+created_in: <来源角色/session>
+---
+```
+- 无 frontmatter 又无单一明确收件人的信 = 畸形。
+
+## Handoff 信必备正文（交办给执行角色，见 `_TEMPLATE-handoff.md`）
+1. **`read_first`（绝对路径，硬性 N19）**：`<REPO_ROOT>/.trellis/workflow.md` + 相关 guides + 该任务 `prd.md`（worktree/独立 session 看不到被 exclude 的 harness overlay，相对路径悬空）。
+2. **process-completeness（N20）**：遵标准 Pipeline，或逐条声明短路的 step（接收方抄进自己 task 记录）；不得静默省略 TDD/security-scan/HITL。
+3. **任务引用** + Multica issue。
+
+## 自动路由 vs 人确认（durable 边界，A2A 自动化判据）
+交办可自动化（若接入了某个瞬态通信后端）到什么程度，按下列切分：
+- **瞬态 = 全自动、免确认**：ack / 状态 / done 通知 / blocker 上报 / 提问 —— 纯协调 chatter，直接自动路由。
+- **durable = 自动送达 + 落定前人确认**：满足任一——① 映射到某 task/EVE；② 产生/改变决策、计划、晋升候选；③ 需 outlive 会话成为记录（plan-ready / decisions / 改 scope 的 delivery / 晋升候选）。**自动送达**，但接收侧/门在"认作已承诺/落定"前**停下等 user 确认**（对齐 HITL/ask-first）。
+- 一句话：**协调 chatter 全自动；承诺级记录 自动送达 + 落定前人确认。**
+
+## 生命周期
+- 瞬态（ack/greenlight/blocker/done）→ **burn**。
+- durable 且映射 L2/L3 → **wimtb**（蒸馏进 Multica issue + 附原信 → 验证 → `rm`；同 verification-and-gates WIMTB 不变式）。
+- 无 EVE 的 durable 信 → 留 `.work_context/` 或升级 guide，不硬塞无关 issue。
+
+## Inherit（接收方"继承"handoff——handoff 的读取侧）
+handoff 是**写**（派活方投信）；inherit 是**读/接管**（接收会话"继承"这封信开工）。接收角色开一个新 session 后：
+1. **读 `read_first`**（信里列的绝对路径：workflow.md + 相关 guides + 该任务 prd）——绝对路径保证 worktree/独立 session 也能加载被 exclude 的 harness overlay（N19）。
+2. **按 process-completeness 声明续流程**：遵 workflow.md 标准 Pipeline，或采纳信里逐条声明的短路 step（抄进自己 task 记录，不静默绕门）。
+3. **认领任务**：从信的 `task` 字段定位 L2/L3 task 目录 + Multica issue，进入对应 Phase（如"从 Phase 2 TDD 入"）。
+4. 完成后按信尾写 `from-<task>-done.md` 回投来源角色。
+> handoff/inherit 是一对动作，操作可由 `sendbox-protocol` skill 的 handoff/inherit verbs 执行；本节定义 Arborist 语义。
+
+## 与 Trellis 的关系
+Trellis 无原生定向交办；`trellis mem`+journal+task 目录覆盖"回忆/连续性"，sendbox 补"定向指令"层。live 多代理才考虑 `trellis channel`。

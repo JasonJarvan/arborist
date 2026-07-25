@@ -1,0 +1,17 @@
+{
+  "name": "agentsview",
+  "description": "本机 AI agent 会话历史查看器：各 coding-agent 的 session 同步进 SQLite，历史检索/分析/会话浏览",
+  "kind": "service-http",
+  "invoke": {
+    "web_ui": "http://127.0.0.1:<port>",
+    "cli": "agentsview <command>",
+    "mcp": "agentsview mcp"
+  },
+  "scope": "global",
+  "requirement": "optional",
+  "install": "从其发布渠道安装二进制；`agentsview serve` 启动",
+  "fallback": "无历史 agent 检索能力 → 退回手翻本地 journal / 各 brand 会话目录（如 ~/.claude/projects/）",
+  "availability": "`agentsview serve status` 输出 running（兜底：端口 LISTEN / 进程 `agentsview serve`）",
+  "auth": "可选 `serve --require-auth`（bearer）；远程 CLI 用 `--server <url> --server-token-file <file>`；凭据不入表",
+  "notes": "<版本/二进制位置>；只读主力：session list/search/get/messages/tool-calls/export、projects、stats、openapi、mcp；写命令（sync/prune/import/secrets scan/pg push）勿经注册表调用"
+}

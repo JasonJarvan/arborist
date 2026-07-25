@@ -1,0 +1,17 @@
+Arborist
+Copyright 2026 Sheng Zhao
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Arborist is derived from Arbor (https://github.com/JasonJarvan/arbor, Apache-2.0,
+Copyright 2026 Sheng Zhao) — the same Trellis + HarnessStack harness with the
+CCB multi-agent runtime integration removed. See CHANGELOG.md for the fork origin.
+
+This product interoperates with, but does NOT bundle or redistribute, the
+following independently-installed tools, which remain under their own licenses:
+  - Trellis (@mindfoldhq/trellis) — AGPL-3.0-only
+  - codegraph, Multica            — optional, per their own licenses
+
+Arborist invokes these via their CLIs as separate processes; it is an
+interoperability overlay (docs / scripts / config templates), not a
+derivative work of them, and contains none of their source code.

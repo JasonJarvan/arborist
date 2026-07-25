@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Arborist 设计札记</title>
+<style>
+  :root {
+    --ground: #f6f5ef;
+    --surface: #fbfaf6;
+    --code-bg: #ecefe7;
+    --ink: #1b241e;
+    --ink-soft: #55605a;
+    --accent: #3f6f52;
+    --accent-ink: #2f5540;
+    --accent-soft: #e7efe9;
+    --hairline: #e0ded4;
+    --shadow: 0 1px 0 rgba(27,36,30,.04);
+
+    --serif: Georgia, 'Songti SC', 'Noto Serif CJK SC', 'Source Han Serif SC', 'STSong', serif;
+    --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif;
+    --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #131711;
+      --surface: #1a1f18;
+      --code-bg: #1b211a;
+      --ink: #e8eae1;
+      --ink-soft: #9aa79c;
+      --accent: #83b592;
+      --accent-ink: #9cc7a8;
+      --accent-soft: #1e2a21;
+      --hairline: #2a3128;
+      --shadow: none;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #131711; --surface: #1a1f18; --code-bg: #1b211a;
+    --ink: #e8eae1; --ink-soft: #9aa79c; --accent: #83b592; --accent-ink: #9cc7a8;
+    --accent-soft: #1e2a21; --hairline: #2a3128; --shadow: none;
+  }
+  :root[data-theme="light"] {
+    --ground: #f6f5ef; --surface: #fbfaf6; --code-bg: #ecefe7;
+    --ink: #1b241e; --ink-soft: #55605a; --accent: #3f6f52; --accent-ink: #2f5540;
+    --accent-soft: #e7efe9; --hairline: #e0ded4; --shadow: 0 1px 0 rgba(27,36,30,.04);
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  img { max-width: 100%; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.72;
+    font-size: 17px;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 0 24px; }
+
+  /* Masthead */
+  header.masthead { padding: 72px 0 34px; }
+  .brandrow { display: flex; align-items: center; gap: 12px; margin-bottom: 26px; }
+  .mark { width: 30px; height: 30px; flex: none; color: var(--accent); }
+  .brand {
+    font-family: var(--mono);
+    font-size: 12.5px; letter-spacing: .18em; text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+  h1.title {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: clamp(30px, 5.2vw, 42px);
+    line-height: 1.12;
+    letter-spacing: -.01em;
+    margin: 0 0 16px;
+    text-wrap: balance;
+  }
+  .dek { font-size: 18px; color: var(--ink-soft); margin: 0; max-width: 56ch; text-wrap: pretty; }
+  .rule { height: 1px; background: var(--hairline); border: 0; margin: 34px 0 0; }
+
+  /* Article */
+  article { padding: 46px 0; border-bottom: 1px solid var(--hairline); }
+  article:last-of-type { border-bottom: 0; }
+
+  .eyebrow { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; }
+  .num { font-family: var(--mono); font-size: 13px; letter-spacing: .12em; color: var(--accent-ink); font-weight: 600; }
+  .kicker {
+    font-family: var(--mono);
+    font-size: 11.5px; letter-spacing: .2em; text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+  h2.post-title {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: clamp(23px, 3.8vw, 29px);
+    line-height: 1.22;
+    letter-spacing: -.005em;
+    margin: 0 0 8px;
+    text-wrap: balance;
+  }
+  .standfirst { color: var(--ink-soft); font-size: 16.5px; margin: 0 0 26px; text-wrap: pretty; }
+
+  .prose > * + * { margin-top: 20px; }
+  .prose h3 {
+    font-family: var(--sans);
+    font-weight: 680;
+    font-size: 16px;
+    letter-spacing: .005em;
+    margin: 34px 0 0;
+    color: var(--ink);
+  }
+  .prose h3::before {
+    content: "";
+    display: inline-block;
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--accent);
+    margin-right: 9px; vertical-align: middle;
+    transform: translateY(-2px);
+  }
+  .prose p { margin: 0; }
+  .prose strong { font-weight: 680; color: var(--ink); }
+  .prose em { font-style: italic; }
+  .prose a { color: var(--accent-ink); text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: 1px; }
+
+  code {
+    font-family: var(--mono);
+    font-size: .86em;
+    background: var(--code-bg);
+    padding: 1.5px 5px;
+    border-radius: 4px;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--hairline);
+    border-radius: 8px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    margin: 0;
+    box-shadow: var(--shadow);
+  }
+  pre code { background: none; padding: 0; font-size: 13px; line-height: 1.65; color: var(--ink); white-space: pre; }
+  .cmt { color: var(--ink-soft); }
+  .grn { color: var(--accent-ink); }
+
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    border-radius: 0 8px 8px 0;
+    padding: 15px 18px;
+    font-size: 16px;
+  }
+  .callout .lbl {
+    font-family: var(--mono);
+    font-size: 11px; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--accent-ink); display: block; margin-bottom: 5px;
+  }
+  .callout p { margin: 0; }
+
+  .footnote {
+    margin-top: 30px;
+    font-size: 15px; color: var(--ink-soft);
+    border-top: 1px dotted var(--hairline);
+    padding-top: 18px;
+  }
+  .footnote .lbl { font-family: var(--mono); font-size: 11px; letter-spacing:.14em; text-transform: uppercase; color: var(--ink-soft); }
+
+  footer.pagefoot {
+    padding: 40px 0 72px;
+    color: var(--ink-soft);
+    font-size: 14px;
+    display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center;
+  }
+  footer .dot { width: 4px; height: 4px; border-radius: 50%; background: var(--hairline); }
+
+  @media (max-width: 560px) {
+    body { font-size: 16px; }
+    header.masthead { padding: 52px 0 28px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="masthead">
+    <div class="brandrow">
+      <svg class="mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M12 22V9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+        <path d="M12 13 6.5 8.5M12 11l5-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+        <circle cx="12" cy="6" r="3.2" stroke="currentColor" stroke-width="1.6"/>
+        <circle cx="5.6" cy="7.8" r="2.1" stroke="currentColor" stroke-width="1.6"/>
+        <circle cx="18" cy="6.2" r="2.1" stroke="currentColor" stroke-width="1.6"/>
+      </svg>
+      <span class="brand">Arborist · 设计札记</span>
+    </div>
+    <h1 class="title">让工具改进自己</h1>
+    <p class="dek">两篇人话技术札记。一篇讲一套工程叠加层怎么“吃自己的狗粮”;另一篇讲一个模型为什么不该全信自己的判断——以及能怎么办。</p>
+    <hr class="rule" />
+  </header>
+
+  <article>
+    <div class="eyebrow"><span class="num">01</span><span class="kicker">Self-hosting</span></div>
+    <h2 class="post-title">吃自己的狗粮:一套叠加层怎么用自己开发自己</h2>
+    <p class="standfirst">如果你在做一套“给别的仓库用”的规则,怎么保证你写的那份,和你自己在用的那份,永远是同一份?</p>
+
+    <div class="prose">
+      <p>先交代背景。这套叠加层(我们叫它 Arborist)本身不改产品代码,它把一套工程纪律——规则文档、脚本、模板——<strong>铺进</strong>别的代码仓,让 AI 在那些仓里干活时有章可循。它自己是“那个包”,别人是“用这个包的项目”。</p>
+
+      <p>问题就出在这:当你想<strong>一边开发这套规则、一边用它开发自己</strong>时,你既是“包”,又是“包的用户”。这两个身份要读同一份内容,却在系统里对应两个不同的位置。</p>
+
+      <h3>天真的拷贝会漂移</h3>
+      <p>最直接的想法:把规则拷贝一份到运行时读的位置。因为引擎只认一个固定目录 <code>.trellis/spec/guides/</code>,而要发布的源在 <code>overlay/spec/guides/</code>。于是你有了两份。</p>
+      <p>两份就会分叉。改了 <code>overlay/</code> 忘了同步 → 你<em>开发时用的是旧的</em>;改了 <code>.trellis/</code> 忘了回填 → 你<em>发布出去的是旧的</em>。这就是“没吃自己的狗粮”——嘴上说的和碗里吃的不是一个东西。</p>
+
+      <h3>一个软链就够了</h3>
+      <p>与其拷贝,不如让运行时读的位置<strong>软链</strong>到发布源:</p>
+      <pre><code>.trellis/spec/guides  ──(symlink)──▶  ../../overlay/spec/guides</code></pre>
+      <p>现在只有<strong>一份文件</strong>。改 <code>overlay/</code>(要发布的产品)= 立刻被自己的引擎读到 = 边开发边自用。物理上不可能漂移,因为根本不存在第二份。</p>
+      <p>那为什么还要两个位置?<strong>不是因为内容不同,是因为两个工具各要一个位置</strong>——git 和发布看 <code>overlay/</code>,引擎运行看 <code>.trellis/</code>。软链只是对它俩说一句话:“这两个位置是同一份字节。”</p>
+
+      <h3>别让配置弄脏产品仓</h3>
+      <p>自举时,引擎会顺手生成一堆<em>实例态</em>文件:本地配置、会话记录、平台钩子。这些<strong>不该进公开仓</strong>——它们是某台机器上的临时状态,不是产品。可你又想给它们留个历史、能回退。</p>
+      <p>这里用一个 git 的老技巧:git 允许把“历史存在哪”(<code>--git-dir</code>)和“管哪些文件”(<code>--work-tree</code>)分开。于是同一堆文件上,可以挂两条互不相干的历史:</p>
+      <pre><code><span class="cmt"># 主 git:管产品(overlay/、脚本、文档),push 到公开仓</span>
+git commit ...
+
+<span class="cmt"># 第二条历史(我们叫它 hgit):管实例态,纯本地、永不 push</span>
+git <span class="grn">--git-dir=.harness-vcs</span> <span class="grn">--work-tree=.</span> commit ...</code></pre>
+      <p>产品仓通过 <code>.gitignore</code> 完全看不见实例态;而这条隐藏历史给你完整的回退能力。两条历史,一个工作树,互不污染。</p>
+
+      <div class="callout">
+        <span class="lbl">关键点</span>
+        <p>单一真源 + 一个软链 = 零漂移。两个 git 数据库、一个工作树 = 配置有历史,却不弄脏产品仓。“自举”不是玄学,是这两招。</p>
+      </div>
+
+      <p>收益很实在:每一次改进这套规则,都会<strong>先在它自己身上被检验</strong>,再发给别人。狗粮真香,前提是你真的在吃。</p>
+    </div>
+  </article>
+
+  <article>
+    <div class="eyebrow"><span class="num">02</span><span class="kicker">Self-improvement</span></div>
+    <h2 class="post-title">一个模型不该全信自己的判断</h2>
+    <p class="standfirst">当一个 AI agent 在一套有纪律的流程里干活,很自然会问:这些护栏,它到底需不需要?它自己判断不行吗?</p>
+
+    <div class="prose">
+      <h3>一个能自证的实验</h3>
+      <p>做法很简单。让模型给出一批建议——“哪些规则该守、哪些可以放松”。然后<strong>另派若干个同型号、彼此独立的评审</strong>,每个只干一件事:<strong>尽力驳倒</strong>其中一条建议,存疑就判“有问题”。</p>
+      <p>结果:<strong>没有一条完全站得住</strong>。模型系统性地犯两类错——把“总该执行”的步吹成“硬门、不可裁量”,又把“必须做”的步说成“可选的保险”;总体上<strong>倾向给自己放权</strong>。</p>
+
+      <h3>教训:能力足够,不等于默认可靠</h3>
+      <p>关键的分辨在这:模型“被问到时能推对”,和“当下默认就做对”,是两回事。流程的价值,<strong>不是教模型怎么做</strong>——那它基本会;而是<strong>顶住两样东西</strong>:</p>
+      <p>一是当下图省事的<strong>漂移</strong>——默认值悄悄偏离最优值;二是不同运行之间的<strong>方差</strong>——同一个模型,这次这样、下次那样。换成一个独立的对抗视角,产出质量能高一个档。</p>
+
+      <h3>三个能对症的机制</h3>
+      <p><strong>四级门控。</strong> 每一步先归类:直接执行 / 自己判断但跳了要留痕 / 要人点头 / 强制人评。判断错门级,正是上面那类错误的根源;先把门级钉死,放权就无处发生。</p>
+      <p><strong>默认照规矩,偏离留痕。</strong> 不靠模型即兴拍板,而是“照流程走;想偏离,写一行为什么”。把“心里默默放权”变成“有审计痕迹的显式决定”。</p>
+      <p><strong>晋升前先被挑战(challenge-before-ack)。</strong> 任何经验要写进共享规则之前,先派一个<strong>独立的同型号怀疑者</strong>去踢馆:过度晋升?重复?把可逆的当成永久的?然后由人签字落盘。</p>
+
+      <h3>再往前一步:给每个模型一份 refine</h3>
+      <p>不同型号的模型,失效方式不一样。可以给某个具体型号写一份<strong>微调档(refine profile)</strong>:记下“这个型号爱怎么犯错、它的默认该往哪个方向收紧”。它先作本地产物存着,成熟了再走 issue 提给上游——相当于给每类使用者<strong>量身改规则</strong>,而不是一套护栏套所有人。</p>
+
+      <div class="callout">
+        <span class="lbl">关键点</span>
+        <p>不是模型不够强、需要拐杖。是无监督下,它的默认值 ≠ 最优值,而且方差不小。结构化的独立挑战,专治这个。</p>
+      </div>
+
+      <div class="footnote">
+        <span class="lbl">自指的注脚</span>
+        <p>上面那个“若干独立评审驳倒建议”的实验,本身就是 challenge-before-ack 的一次实跑。而它抓到的第一个受害者,正是写这篇札记的模型自己。</p>
+      </div>
+    </div>
+  </article>
+
+  <footer class="pagefoot">
+    <span>Arborist 设计札记</span>
+    <span class="dot"></span>
+    <span>self-hosting × self-improvement</span>
+    <span class="dot"></span>
+    <span>用人话写给会读代码的人</span>
+  </footer>
+</div>
+</body>
+</html>

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# 本地 harness 版本控制（独立 git-dir、无 remote；产品仓看不见）。当 git 用：
+#   ./hgit status | ./hgit log | ./hgit diff | ./hgit checkout <sha> -- <path>
+# 快照新改动： ./hgit add -f .trellis .mcp.json scripts/trellis_multica_sync.py AGENTS.md .work_context && ./hgit commit -m "..."
+root="$(cd "$(dirname "$0")" && pwd)"
+exec git --git-dir="$root/.harness-vcs" --work-tree="$root" \
+     -c user.name="harness-local" -c user.email="harness@localhost" "$@"
