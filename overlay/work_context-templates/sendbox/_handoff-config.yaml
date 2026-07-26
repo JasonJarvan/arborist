@@ -8,6 +8,10 @@ read_first:
     - <REPO_ROOT>/.trellis/spec/guides/sendbox.md
   soft: []
 
+# brand_routing 是「能力驱动 handoff」的路由表：仅当某 handoff 因任务依赖某 brand 独有能力
+# 而钉了 recipient_brand 时，才用 (recipient_brand, lane, task_kind) 从这里精确选 leaf。
+# 默认 brand-agnostic handoff 不钉 brand、不查此表（谁接谁以自身 actual runtime brand 跑）。
+# 下面这些字段不是「每封 handoff 必填」，而是 brand 被钉时该 brand 的执行规格。
 brand_routing:
   task_executing_roles:
     - Impler

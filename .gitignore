@@ -31,3 +31,7 @@ AGENTS.md
 # Internal, per-machine sidecars — versioned via hgit, never the public repo.
 # (e.g. consumer/model-scoped refine profiles that reference private instances)
 refine-candidate-*.md
+
+# python bytecode
+__pycache__/
+*.pyc

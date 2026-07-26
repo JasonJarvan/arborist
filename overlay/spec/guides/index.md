@@ -33,4 +33,4 @@
 | [0003](./decisions/0003-cross-session-reach-semantics.md) | `session_id` 触达语义 = `--resume` 追加，据活性选通道 | accepted | gardener |
 | [0004](./decisions/0004-closeout-split-l2-draft-l4-accept.md) | 收尾职责分层 — L2 起草 / L4 轻量 accept | accepted | rootorc-methodology |
 | [0005](./decisions/0005-agenttui-role-lineage-vs-generation.md) | AgentTUI 注册表补角色继承代数 lineage（与 generation 正交） | accepted | adopter-rootorc-v2 + gardener |
-| [0006](./decisions/0006-runtime-brand-is-routing-authority.md) | actual runtime brand 是 subagent 路由唯一权威 | accepted | human brand-compat ruling + gardener |
+| [0006](./decisions/0006-runtime-brand-is-routing-authority.md) | actual runtime brand 是 subagent 路由唯一权威 | accepted（+2026-07-26 amend.） | human brand-compat ruling + gardener |

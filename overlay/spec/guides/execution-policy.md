@@ -6,7 +6,9 @@
 
 `effective_subagent_brand = impler.spec.brand`
 
-这个 same-brand gate 适用于实现、TDD、重构、Explore、check、challenge 与 research，且先于下述 auto/ask-first/HITL 判断。执行角色 handoff 缺少 recipient brand、brand 不在宿主支持列表、实际 ATUI 与注册声明不一致，或计划中的 provider 产生 **brand mismatch**，都必须 fail closed：不创建 subagent、不猜默认值、不伪装成另一 brand。修正注册信息或 handoff 后才可继续。
+这个 same-brand gate 适用于实现、TDD、重构、Explore、check、challenge 与 research，且先于下述 auto/ask-first/HITL 判断。brand 不在宿主支持列表、实际 ATUI 与注册声明不一致，或计划中的 provider 产生 **brand mismatch**，都必须 fail closed：不创建 subagent、不猜默认值、不伪装成另一 brand。修正注册信息或 handoff 后才可继续。
+
+> handoff **缺** recipient brand 本身**不**是 fail-closed 触发器（ADR-0006 2026-07-26 Amendment）：brand-agnostic handoff 默认不带该字段是合法的——认领方以其自身 actual brand 开跑、并在该 brand 内跑同 brand 链。fail-closed 只对**已钉 brand 的能力驱动 handoff** 生效（其 recipient brand 缺失/非法/与实际不匹配才拦）。链内 `effective_subagent_brand = impler.spec.brand` 不受影响、始终成立。
 
 Human 直接运行、无需 A2A 发现或路由的 harness 会话属于注册豁免；它们没有“缺注册 brand”的 gate 错误。该豁免不允许一个已参与路由的 Impler 绕过 same-brand 校验。
 

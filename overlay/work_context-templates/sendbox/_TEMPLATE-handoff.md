@@ -3,6 +3,7 @@ recipients:
   - role: <Impler|SubOrche|RootOrche|User|TestTeam>
     purpose: <为何读这封>
     lifecycle: <终止条件，如 "L2 started" / "signed off">
+# 下面两块仅能力驱动 handoff 用（任务依赖某 brand 独有能力时才带）；默认 brand-agnostic → 整块省略，谁接谁以自己 actual runtime brand 跑
 recipient_brand: <claude-code|codex>
 route_policy:
   policy_id: <selected-policy-id>
@@ -18,13 +19,13 @@ created_in: <来源角色/session>
 ---
 # from-<task>-handoff
 
-## Recipient brand（执行角色必填）
-顶层 `recipient_brand` 是接收者的 actual runtime brand，不是作者 brand 或期望模型。生成前以 `(recipient_brand, lane, task_kind)` 从 `_handoff-config.yaml` 精确选择一个 `route_policy`；缺失、未知或 brand mismatch 时停止，不猜默认值。
+## Recipient brand（可选：仅能力驱动 handoff）
+**默认省略本节**：handoff 默认 brand-agnostic，不钉执行者 brand，谁接就以自己的 actual runtime brand 跑。**只有当任务依赖某 brand 独有能力**（换 brand 无法等价完成）才钉 brand，填以下块。填时：顶层 `recipient_brand` 是接收者的 actual runtime brand，不是作者 brand 或期望模型；生成前以 `(recipient_brand, lane, task_kind)` 从 `_handoff-config.yaml` 精确选择一个 `route_policy`；缺失、未知或 brand mismatch 时停止，不猜默认值。
 
 - `recipient_brand: codex`：implement/TDD/refactor/Explore/check/challenge/research 全部使用 Codex。
 - `recipient_brand: claude-code`：fast implement=Sonnet、full implement=`trellis-implement-full`/Opus、Explore=`trellis-explore`/Sonnet、check/challenge=Opus、research=Sonnet。
 
-## Selected route
+## Selected route（仅能力驱动 handoff；brand-agnostic 时删除本节）
 
 > policy_id: <selected-policy-id>
 > recipient_brand: <claude-code|codex>

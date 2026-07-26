@@ -1,6 +1,6 @@
 # ADR-0006: actual runtime brand 是 subagent 路由唯一权威
 
-- **Status**: accepted
+- **Status**: accepted（含 2026-07-26 Amendment，已 rootorc accept）
 - **Origin**: human brand-compat ruling（2026-07-26）+ gardener systematic hardening
 - **Date**: 2026-07-26
 
@@ -28,6 +28,7 @@ provider 的强制路由，另一 brand 的 Impler 会把本来合法的同品�
 - task-executing handoff 显式记录 `recipient_brand`，并只允许按
   `(recipient_brand, lane, task_kind)` 精确选择宿主配置的一个 route policy。缺值、未知值、
   tuple 缺失或实际/记录 brand 不匹配均 fail closed，不设默认和 fallback。
+  （**已由 2026-07-26 Amendment 收窄**：`recipient_brand` 非每封 task-executing handoff 必带——默认 brand-agnostic、不在交接信里替执行者钦定 brand；仅当**任务依赖某 brand 的特定能力**时才钉 `recipient_brand` + route policy，fail-closed 亦仅对已钉 brand 的信生效。见文末 Amendment。）
 - 品牌中立规范保存在 guides；同一短契约机械安装到 Codex 可见的 `AGENTS.md` 和 Claude
   Code 可见的 workflow Phase Index，并由 validator 检查同步。
 - provider-specific agent/model 只存在于对应 brand 的 route leaf。Claude Code 的固定模型
@@ -52,4 +53,21 @@ provider 的强制路由，另一 brand 的 Impler 会把本来合法的同品�
 - 负：新增 brand 或 task kind 必须补齐 route matrix 和两个可见面校验，不能靠 wildcard
   快速接入；这是为 fail-closed 刻意支付的维护成本。
 - 负：历史 handoff 不自动重写；仍处于生命周期内且冲突的信必须加明确覆盖标记，其他历史
-  信保留审计语境。
+  信保留审计语境。带了非必要 `recipient_brand` 的历史信不追溯为错——只是「已钉 brand」的信。
+
+## Amendment（accepted 2026-07-26）
+
+**把「每封 task-executing handoff 必带 `recipient_brand`」收窄为「默认 brand-agnostic，仅能力驱动地钉 brand」。**
+
+**动因**：原决策把「显式记录 `recipient_brand`」写成所有 task-executing handoff 的硬性要求，实践中被误读为「交接信要替执行者预先钦定 brand」。这混淆了两件不同的事：
+- **链内 same-brand 不变式**（`effective_subagent_brand = impler.spec.brand`，本 ADR 决策 2）——一个 Impler 无论是什么 brand，其 L1 subagent 都随它同 brand、不伪装。**此项不变、始终成立。**
+- **跨 session 交接时预先钦定执行者 brand**——这是本 Amendment 要收窄的：默认**不该**在 handoff 里规定谁（哪个 brand）来执行。
+
+**修订**：
+- **默认 brand-agnostic**：handoff 不带 `recipient_brand`/`route_policy`；任何受支持 brand 的 session 都可认领，**谁接就以其 actual runtime brand 执行**，并据决策 2 在其自身 brand 内跑同 brand L1 链。`recipient_brand` 由「作者规定」降为「省略 → 认领方按自身 brand 定」。
+- **仅能力驱动地钉 brand**：当且仅当**任务依赖某个 brand 的特定能力**（该 brand 独有的工具/特性，换 brand 则做不成）时，才在 handoff 显式记录 `recipient_brand` + route policy。判据 = 「任务本身是否需要该 brand 的独有能力」，而非「作者当前是什么 brand / 图省事」。
+- **fail-closed 条件化**：缺值/未知/tuple 缺失/实际-记录 brand 不匹配的 fail-closed，**只对已钉 brand 的能力驱动 handoff 生效**；brand-agnostic handoff 合法且无需该字段，不触发路由门。
+
+**三门仍成立**：难逆（handoff 协议、validator、模板共依该字段语义）、反直觉（「记录真实 brand」看似总该做，但对不依赖 brand 能力的任务，预先钉定反而把可移植任务锁死在一个 provider）、真权衡（牺牲「统一每封都带 brand」的一致性，换取默认可移植 + 只在真需要处付路由成本）。
+
+**为何是 amendment 而非新 ADR**：不推翻 ADR-0006 核心（`spec.brand` = actual runtime、链内 same-brand、双可见面、human 直连豁免），只把决策 3 一条从「无条件」收窄为「能力驱动条件化」，未引入新机制/新字段（`recipient_brand`/route policy 仍是同一套，只是触发条件变了）。与 ADR-0002/0003 的自我 amendment 同构。validator 无需改（它校验 config/模板 schema，不强制 runtime 每封信带 brand）。
