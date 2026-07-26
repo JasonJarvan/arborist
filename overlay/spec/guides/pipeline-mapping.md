@@ -30,3 +30,13 @@
 - **门控**（HS Execution Policy）横切在各步：见 `execution-policy.md`（auto/auto-judge/ask-first/HITL）。
 - **不吸纳**：OpenSpec 正式 specs（步4，D2）、Task-ID 三-id 不变式（Trellis 单 id）、version-plan（发布列车替代）。
 - HS 无、Trellis/本仓有：`trellis mem` 跨工具对话检索、per-turn breadcrumb、codegraph MCP。
+
+## Deferred / backlog 任务（**装了 Multica 的项目**）
+
+一件「认可要做、但现在不执行」的任务（roadmap / 未启动），落点规范：
+
+- **有 Multica**：建一条 **Multica issue `status: backlog`**——`backlog` 是台账的**一等 defer 态**（合法 status：`backlog` / `todo` / `in_progress` / `done`）。**不要**建「永不 `start`」的 Trellis 任务：Trellis 任务是为**执行周期**设计的，空挂着是反模式。
+- **拉进执行时**才 `task.py create` + `start`；`after_start` hook 把它同步进 Multica（`backlog` → `in_progress`/`todo`）。即 **Trellis 任务只在进入执行周期时才存在**，backlog 期只活在 Multica。
+- **单一真相源**：那条 Multica backlog issue。若另有上游/公仓 issue，作**镜像**（互链），别在 Trellis + Multica + 记忆间重复记状态。
+- **无 Multica 兜底**：deferred 项留在本地 backlog 记录（上游 OPEN issue / 本地 note / RepoMem），**同样不建永不 start 的 Trellis 任务**；台账能力缺席按 `tool-registry.md` §3.2 Multica `fallback` 降级。
+- **边界**：具体 issue 号/ID 是**实例特定值**，只进运行时/记忆，**不写进本 guide**（见 `generalization-boundary.md`）。
