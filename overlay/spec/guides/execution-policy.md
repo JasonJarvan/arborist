@@ -17,6 +17,15 @@ Human 直接运行、无需 A2A 发现或路由的 harness 会话属于注册豁
 - **ask-first** — 真人决策点，宣布将做什么并**等用户批**。用于有外部副作用的步：**commit / push / MR / security-scan / task archive**。
 - **HITL（强制人评）** — 契约强制的人类评审，不可配置。用于：**ADR/spec 的最终接受**（`proposed→accepted`，RepoMem.merge 等价）+ **跨任务一致性裁决**。注：full-lane 下 L2 收尾**起草** ADR 为 `proposed` 是 auto-judge（起草≠接受）；把 `proposed` 翻成 `accepted` 才是 HITL，归 L4/human（见 `roles-and-tiering.md` 收尾职责分层）。
 
+## 决策请求必带结构（ask-first / HITL 门递给 human 的输入契约）
+
+ask-first 与 HITL 门把决策**递给 human**；递上去的**形态**是有契约的——把候选路径和代价推导出来，正是 agent 该替 human 做完的活，不能甩给 human。
+
+- **每个需 human 拍板的项 → 2–4 个具名选项**，每个选项写：**选它会发生什么 / 代价是什么**；再附 **agent 的推荐及理由**。**纯散文式的问题陈述不算决策请求**——把问题铺陈一大段、却让 human 自己去推导候选与取舍，是没做完的工作。
+- **有交互式提问工具的平台就用它**呈现这些具名选项；没有的，就在文本里用同一结构。
+- **可读性通则**：给 human 看的决策材料**别压成箭头链 + 内部标识符**（`A→B→C`、光秃秃的工单号 / policy_id）。人要读的是「选项 + 代价 + 建议」，不是内部速记。
+- **只递你自己 lane、且需 human 拍板的项**——别把别的 session 的待决策并进你这张单子（归属边界的「对 human」方向，权威定义见 [roles-and-tiering.md](./roles-and-tiering.md)「ATUI 归属边界」）。
+
 ## Skip Bias（程序轴，与 Lane 结构轴正交）
 
 在 task `prd.md` 顶部可声明 `Skip Bias: conservative|aggressive`（只影响 auto-judge 步）：
@@ -49,6 +58,7 @@ Human 直接运行、无需 A2A 发现或路由的 harness 会话属于注册豁
 | security-scan（依赖变更）| **ask-first** + 是 MR-into-release 硬 gate（见 verification-and-gates）|
 | commit / push / MR | **ask-first**（defer <project> `/commit` `/pr`）|
 | ADR/spec 起草为 `proposed`（L2 full-lane 收尾） | **auto-judge** + 派独立 challenge subagent |
+| challenge/红队 subagent（风险触发） | **auto-judge**：命中 full-lane，或 authn/authz/secrets/crypto/租户隔离/输入信任边界，或框架/运行时默认 → **强制派**（见 verification-and-gates 风险形触发）。fast-lane 命中此类**非纯 L2 自收尾**（ADR-0004 Residual）|
 | ADR/spec 接受 `proposed→accepted` + 跨任务裁决 | **HITL**（L4/human）+ 前置 Challenge-before-ack |
 | task archive | ask-first |
 

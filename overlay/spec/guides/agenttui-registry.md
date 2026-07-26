@@ -107,6 +107,7 @@
 - **收尾**：干净结束时写 `state: "stopped"`。
 - **gardener**：持有并更新全局 `index.json`（跨项目摘要汇总）；按 §3 保守 GC stale 条目；校验 name 唯一；探针遗留项由 gardener 实测后回填本 guide：codex mtime **已实证**（见 §2.2）；**待实证**——无桥接自识别兜底（nonce grep，§5.2）、跨目录/跨项目 `--resume` lookup（§3 末）。
 - **rootorc / suborc / impler**：登记自身、读表知同伴、专注本职；**subimpler 不建条目**。
+- **归属边界（跨 ATUI 别抢活）**：ATUI 只管自己 lane 的活；别的 ATUI 就其自身 lane 的**通报**（`fyi`）是 FYI 非交办，默认「知道了」不接手；看见别人 lane 的问题 → 告诉归属方或 human。权威定义见 [roles-and-tiering.md](./roles-and-tiering.md)「ATUI 归属边界」。
 
 ## 5. 操作说明：首次进项目怎么读表 / 自登记
 

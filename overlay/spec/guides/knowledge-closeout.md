@@ -27,6 +27,9 @@
 2. → 收尾方 / 人**确认** → 才进阶段二清场。
 3. **删除候选未确认前一个不删**；任务初始的「随手清理」不算最终确认。
 
+## §5 Landing manifest（收尾无条件产出）
+本门查「改动**连累**到的改动面外文档是否还准」；与之并列，收尾**必须无条件产出 landing manifest**——记「本次**主动落/改**了哪些盘、谁看过」，**为空时也要显式产出**（省略 manifest 才是违规）。逐条含「哪个文件哪一节 / 新增 vs 改写既有结论 / 类别（task 本地约定·跨模块 spec·跨切 guide·ADR）/ 谁评审（`nobody reviewed this` 是显式允许的值）」。它是荣誉制 HITL 晋升门的机械化替代——权威定义与栏位见 [`verification-and-gates.md` «Landing manifest»](./verification-and-gates.md#landing-manifest收尾无条件产出--hitl-晋升门的机械化替代)。
+
 ## §4 知识放置
 放哪层、晋升与否，一律遵 [`repomem-doc-boundary.md`](./repomem-doc-boundary.md)，此处不复述。
 

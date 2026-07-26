@@ -104,6 +104,24 @@ grep -q '^/\.arborist/$' "$EXC" 2>/dev/null || cat >> "$EXC" <<'EOF'
 /.arborist/
 EOF
 
+# worktree symlink 兼容：harness 目录被 worktree symlink 回主树后（见
+# scripts/harness_worktree_link.sh），需【不带斜杠】的 exclude 形式才能让 git check-ignore 匹配到
+# symlink。两形式都要：带斜杠的 `/.trellis/` 只匹配【真目录】、不匹配 symlink（否则 symlink 以
+# `?? .trellis` 现形、git status 不归零）；不带斜杠的 `/.trellis` 兼匹配主树真目录与 worktree 里的
+# symlink。exclude 在 common git dir，主树写一次覆盖所有 worktree。
+# 独立守卫（含早期 adopt 增量补写）：判 .trellis 无斜杠形式是否已在。
+grep -q '^/\.trellis$' "$EXC" 2>/dev/null || cat >> "$EXC" <<'EOF'
+
+# Arborist overlay — 无斜杠形式（匹配 worktree 里 symlink 化的 harness 目录；见 scripts/harness_worktree_link.sh）
+/.trellis
+/.work_context
+/.arborist
+# 注意：/.claude 与 /docs 是 blanket 隐身。exclude 只作用于【未跟踪】文件——
+# 若产品仓已 git-tracked docs/（或 .claude/），已跟踪文件不受影响，仅令其中未跟踪的新文件隐身。
+/.claude
+/docs
+EOF
+
 echo "→ 建本地 harness 版本仓 .harness-vcs（无 remote）"
 if [ ! -d "$ROOT/.harness-vcs" ]; then
   git --git-dir="$ROOT/.harness-vcs" --work-tree="$ROOT" init -q

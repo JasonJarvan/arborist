@@ -30,9 +30,20 @@ Human 收件人若不执行 task，可以不带 brand；一旦 handoff 让收件
 - `<Role>`/`<Receiver>` 是**角色/职能**，非 session 名（session 短命、角色不）。
 - 都在 `.work_context/`（git-ignored → 本地；副仓 `hgit` 记历史）。
 
+## 持久化与可见性（形态 A / B —— **本布局 = 形态 B**）
+信件的持久化与可见性取决于宿主仓 git 配置，两形态，adopt 时确定并写明：
+
+- **形态 A —— sendbox 纳入宿主 git**：信随分支合并流动，跨 worktree / 跨 checkout / 跨机器协作方可见、可经 MR 评审；代价是内部协作记录进产品仓历史。
+- **形态 B —— sendbox 排除出宿主 git（Arborist 脚手架默认推荐，本仓即此）**：`.work_context/` 被 `.git/info/exclude` 排除、由副仓 `hgit` 记史。含义：
+  - **`sendbox-protocol` skill 的「把信提交在 worktree 分支上、随合并流动」这条 Cross-cwd 路径在本布局不成立**——信不在产品 git 里。跨 worktree / 跨 cwd 只能**用绝对路径直写宿主主仓**的 sendbox——**这才是 `read_first` 必须绝对路径的根因**（不只是「相对路径悬空」，是信与规范本身都不在 worktree 里；worktree 里静默拿到空结果比报错更危险）。
+  - **可回溯性靠 `hgit`（人工触发、无 remote）**：无步骤强制 `hgit` 时「有历史」是习惯非保证，换机 / 删除即全丢——而信的 lifecycle 常含跨天 `persist`，此承诺要额外留意。
+  - **跨机 / 跨人不可见**：协作方在另一台机器上，这封信对它不存在；跨机需另走渠道。
+  - **精确暂存到文件**：`hgit add <file>` 按文件、勿整目录 `add -A`——整目录会把并发会话改到一半的文件一并提交。
+- **脱敏 × git 归属**：若你用的写信技能在信尾追加 `<!-- These letters are committed to git … -->`，**那句在形态 B 不成立**（信不进产品 git，别据它判断可见性 / 该不该写敏感信息）；但**脱敏要求两形态都保留**——任何形态下都不写明文密钥 / token / PII（本机 `hgit` 同样是可读态）。
+
 ## 信命名规范
 `from-<task>-<type>.md` —— `<task>` = 来源 L2/L3 task 的 slug；`<type>` ∈
-`handoff`（派活）· `done`（交付回报）· `ack`（确认）· `blocker`（阻塞）· `greenlight`（放行请求）· `plan-ready`（计划待评审）· `decisions`（决策记录）· `smoke`（人工 smoke 手册）。
+`handoff`（派活）· `done`（交付回报）· `ack`（确认）· `blocker`（阻塞）· `greenlight`（放行请求）· `plan-ready`（计划待评审）· `decisions`（决策记录）· `smoke`（人工 smoke 手册）· `fyi`（通报：我在自己 lane 处理 / 已处理，你知道就好——**不转移归属、不请求行动**；与 `blocker`「我卡住你来定」语义相反。防「通报被当交办」，见 [roles-and-tiering.md](./roles-and-tiering.md)「ATUI 归属边界」）。
 例：`toAgent/toImpler/from-eve-42-handoff.md`、`toHuman/toUser/from-eve-42-greenlight.md`。
 
 ## Frontmatter 规范
@@ -72,7 +83,7 @@ created_in: <来源角色/session>
 - 一句话：**协调 chatter 全自动；承诺级记录 自动送达 + 落定前人确认。**
 
 ## 生命周期
-- 瞬态（ack/greenlight/blocker/done）→ **burn**。
+- 瞬态（ack/greenlight/blocker/done/fyi）→ **burn**。
 - durable 且映射 L2/L3 → **wimtb**（蒸馏进 Multica issue + 附原信 → 验证 → `rm`；同 verification-and-gates WIMTB 不变式）。
 - 无 EVE 的 durable 信 → 留 `.work_context/` 或升级 guide，不硬塞无关 issue。
 

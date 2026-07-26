@@ -33,6 +33,8 @@
 | `availability` | 怎么判断它在线：探测命令 / 端口 / 进程（优先选**只读**探测命令） |
 | `auth` | 是否需鉴权及方式——只记 flag/机制名，**凭据（token/密码/连接串）绝不入表**（注册表虽机器本地，仍属可读态） |
 | `notes` | 属主 / 版本 / 注意事项（如「哪些子命令有副作用，勿经注册表调用」） |
+| `known_limits`（可选） | 该能力的**已知局限**清单：每条 = 现象 + 触发条件 + fallback 动作。工具输出**不是完备事实**——凡有「静默漏/静默空」失效模式（不报错却结构性漏真相，`0 命中`与「不存在」不可区分）的工具须登记（见 [§3.4 已知局限](#已知局限)） |
+| `architecture`（视需要） | 该工具的**部署形态**：仅当形态会误导运维推断时登记，如 `shared-daemon`（一 daemon 多 client；detach 后 `parent=1` 属正常，**勿按 parent-PID 判孤儿去 GC**） |
 
 **空白模板**（登记新工具时抄；adopt 亦铺在 `<repo>/.arborist/templates/tools/`）：
 
@@ -48,7 +50,9 @@
   "fallback": "<缺席/拒装时的兜底行为>",
   "availability": "<只读探测命令 / 端口 / 进程>",
   "auth": "<鉴权方式 flag 名；凭据不入表>",
-  "notes": "<属主 / 版本 / 副作用警示>"
+  "notes": "<属主 / 版本 / 副作用警示>",
+  "known_limits": ["<现象 + 触发条件 → fallback 动作>（可选；有静默漏/静默空失效模式的工具须填）"],
+  "architecture": "<部署形态，如 shared-daemon（可选；仅当形态会误导运维推断时填）>"
 }
 ```
 
@@ -135,11 +139,32 @@
 
 > **分词坑**：把多词子命令存进变量再执行时，zsh 默认不对未引用变量分词——整串被当成单个参数传入，部分 CLI 会**静默回退打印根 help**（探测看似成功实则没执行）。探测/调用脚本用 bash，或在 zsh 里显式分词（`${=cmd}`）。
 
+<a id="已知局限"></a>
+## 3.4 已知局限（known limits）：把「工具输出 ≠ 完备事实」写进注册条目
+
+注册表原来只说「有哪些能力、怎么调、是否可用」，**没有放能力已知局限的位置**——读者遂把工具输出当完备事实。但很多工具都有「静默漏 / 静默空」失效模式：不报错，却结构性地看不到一部分真相，`0 命中` 与「不存在」不可区分。这类失效若不登记，读表的 agent 无从知道该交叉核验，据错误结论写进 guide、发上行信的事已实测发生过。
+
+**两条规则（注册要求）：**
+
+1. **局限属于条目**：工具的已知局限写进它**自己的** `tool.json`（`known_limits` 字段；部署形态会误导运维推断时另加 `architecture`）。gardener 校验时，凡有「静默漏/静默空」失效模式的工具，其条目应带 `known_limits`。
+2. **`prefer` 必配 fallback**：任何写「prefer tool X」的 spec 行，**必须同时写出 X 的 fallback 动作**（局限触发时怎么办）。只推荐、不给退路的行视为不完整——因为「prefer」被字面执行时，正是局限咬人的地方。
+
+> 与 §2 的 `fallback` 正交：`fallback` 管「工具**缺席**时的兜底」，`known_limits` 管「工具**在、但这次输出不完备**」。
+
+**播种示例**（取自实测；codegraph / grep / 代码索引 daemon 均为通用工具，此处按能力泛化，不含任何单机实例值。overlay 未随附这三者的 `tool.json` 示例条目，故以下以示例形式列出；真机若登记这些工具，把对应条目搬进各机 `tool.json` 的 `known_limits` / `architecture`）：
+
+- **codegraph 漏依赖注入 / 装饰器边** — `impact <symbol>` 对经 DI/装饰器在**另一文件**消费的符号，只返回定义文件内的符号，漏掉跨文件消费边（连 import 边都可能不算）。同类风险：任何运行期注册 / 反射接线（Spring、NestJS 装饰器…）。
+  - **fallback**：codegraph 用于**定位**；`impact` 的结论须先用 `grep`/`rg` **交叉核验**才算 verified。按 impact 结果做 rename / 删除前尤须核验。
+- **`grep -r` 静默跳过 symlink 目录** — `-r` 不跟随 symlink 目录，对含 symlink 的树返回**静默零命中**；当树里相当比例的条目是 symlink（指向外部 store）时，`-r` 结构上看不到其中一大部分，**`0 命中` ≠「不存在」**。
+  - **fallback**：可能含 symlink 的树一律用 `-R`（或 `rg --follow`）；**此处 `0 命中` 不等于不存在**。典型场景是 **worktree**——harness overlay 目录以 symlink 链回主树后，worktree 里这些目录**普遍是 symlink**，`-r` 会让你误判「仓里没有 X」。见 [roles-and-tiering «worktree 步与纪律»](./roles-and-tiering.md#worktree-步与纪律l2l3-默认在-worktree-工作)。
+- **分离守护进程 `parent=1` 不是孤儿** — 采「一 daemon-per-repo + thin-client-per-session」形态的工具（如代码索引 daemon），daemon detach 后 `parent=PID 1`，看着像孤儿遗留；但它正被多个 client 连着，且通常自带 idle 超时会自回收。按 parent-PID 推断去 kill「孤儿」会终止**正在服务**的 daemon，索引虽在、连着的 session 却断，「清理」为**负价值**。
+  - **登记 `architecture: shared-daemon`**；纪律：**别按 parent-PID 推断做 GC**——要回收走工具自己的 stop / idle 机制。
+
 ## 4. 生命周期与角色
 
 - **登记**：工具由 gardener（或安装该工具的人）按 §2 schema 写 `tool.json`——机器级服务进 `~/.arborist/tools/`，项目专属进 `<repo>/.arborist/tools/`；adopt 时 optional 工具经 §2.5 prompt 顺带登记。
 - **发现**：任何 AgentTUI 读级联工具表即得可用能力清单；用前按 `availability` 自检（§3.3）。
-- **gardener**：维护两级工具表——定期探活、剔除失效条目（工具已卸载/服务已废弃）、校验 name 唯一与 schema 完整（optional 条目必须带 `fallback`）、把新装的机器级工具登记进全局表。
+- **gardener**：维护两级工具表——定期探活、剔除失效条目（工具已卸载/服务已废弃）、校验 name 唯一与 schema 完整（optional 条目必须带 `fallback`；有「静默漏/静默空」失效模式的工具须带 `known_limits`，见 [§3.4](#已知局限)）、把新装的机器级工具登记进全局表。
 - **演进（留待长期）**：若将来某 AgentTUI 要把自身能力暴露给同伴，可让其 [AgentTUI 注册表](./agenttui-registry.md)条目引用它提供的 tool 条目——两表同构即为此留的口。
 
 ## 5. 许可与边界

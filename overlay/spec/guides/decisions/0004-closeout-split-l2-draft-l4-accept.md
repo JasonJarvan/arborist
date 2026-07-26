@@ -29,5 +29,9 @@
 - 正：rootorc 从重收尾解放，HITL 只留在真正要它的地方（对外提交 / 跨任务 / ADR 接受）；challenge 前移到 L2 起草，问题更早暴露。
 - 负：challenge subagent 与起草方共享先验，独立性弱于跨 session 评审——**护栏**：subagent 必须对抗式 prompt（默认候选不成立）。待迭代：把可复用 challenge/red-team subagent 持久化进 agent pool（需新开 `overlay/agents/` 发行类别 + adopt 铺设）。
 
+## Residual（后续 issue 落地后收紧）
+- **fast-lane「全权自收尾」不无条件**：challenge 门的触发已从 Lane 改为**风险形状**——fast-lane 任务若命中 authn/authz/secrets/crypto/租户隔离/输入信任边界，或正确性依赖框架/服务器运行时默认，仍**强制派独立 challenge**（见 [`verification-and-gates.md`](../verification-and-gates.md) 风险形触发）。即「fast lane：L2 全权自收尾」受此 carve-out 约束，不等于「fast-lane 免 challenge」。
+- **护栏必须与可见性无关**：本 split 的下放与「L4 轻量 accept」的「轻量」，**不得以「候选已登记进 ADR 索引 / 待接受包 durable 记录、human 事后可审计」为据**——在 `spec_visibility: machine-local`（overlay 隐身、无第二读者/无 MR）下该前提不成立（见 [`repomem-doc-boundary.md`](../repomem-doc-boundary.md) 可见性节）。存活的护栏只能是 visibility-independent 的：对抗式 challenge subagent + 永不下放的 L4 accept（产品仓 commit/push、跨任务裁决、ADR 最终接受）。
+
 ## 适用范围
 本 split 治理**任务收尾**（fast/full lane）。**harness 自身开发**（写 guide / ADR / 改规则）**不受强制下放**——rootorc 或 gardener 可按体量自行直做：小而快直做，大或会阻塞才派 impler。下放是手段不是义务。

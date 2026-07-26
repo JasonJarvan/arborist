@@ -20,10 +20,25 @@
 | 放哪 | 装什么 | 例子 | 谁读它 |
 |---|---|---|---|
 | **占位符**（guide 正文内） | 会被机械替换的路径/名字 | `<REPO_ROOT>` `<project>` `<HOME>` | `arborist-sync` 的 sed（pull 特化 / push 泛化） |
-| **`workflow.md` 定制层** | 实例的**行为/策略**覆盖 | git/MR 流、Lane 触发、工具选型（有无 codegraph）、扫描器 | 每轮 breadcrumb（update-safe，不在 trellis update hash） |
-| **`host-config`**（`.trellis/host-config.yaml`；实例本地、`hgit` 记史、**永不同步**） | 实例**具体值**的单一真源 | 仓根绝对路径、项目名、Multica/tracker IDs、子树清单、语言/扫描器名、组织 git 约定 | 运行时 + `arborist-sync` 取值做替换 |
+| **`workflow.md` 定制层** | 实例的**行为/策略**覆盖 | git/MR 流、Lane 触发、工具选型（有无 codegraph）、扫描器 | 运行时读 workflow.md 时（update-safe，不在 trellis update hash）。**注意：定制层正文本身不被 SessionStart / 每轮 breadcrumb 自动注入**——见下节「注入子集边界」 |
+| **`host-config`**（`.trellis/host-config.yaml`；实例本地、`hgit` 记史、**永不同步**） | 实例**具体值**的单一真源 | 仓根绝对路径、项目名、Multica/tracker IDs、子树清单、语言/扫描器名、组织 git 约定、**spec/ADR 可见性档 `spec_visibility`** | 运行时 + `arborist-sync` 取值做替换 |
 
 **授权判据**：往 guide 正文写一个值之前，问一句——「另一个仓 clone 这份 guide，这个值还成立吗？」不成立 → 它是实例特定的，**移出去**（上表三处之一），正文留占位或引 host-config 键。
+
+> **推论（可见性/git 状态也是实例值）**：guide 正文若断言「spec/ADR 是 git-tracked、团队共享」，那是把一个**实例特定的可见性状态**焊进了同步物——换个 adopter（overlay 脚手架默认对产品仓隐身）该断言即为假，正是本判据要拦的错。可见性属实例值：其档位由 host-config `spec_visibility: product-git | machine-local` 定，guide 只描述**两个世界**、不预设某一个。此轴与「上行同步可见性」正交——`spec_visibility` 说的是 spec/ADR 是否进**产品仓 git**，非是否上推模板。两个世界各得/各失什么见 [`repomem-doc-boundary`](./repomem-doc-boundary.md) 「spec/ADR 可见性」节。
+
+## 注入子集边界：定制层 ≠ 被加载
+
+> 通则：**任何只注入一个文件【子集】的脚手架，都必须在文件里、在边界处，说明它注入的是哪个子集。** 否则子集外的内容读着完美、被版本管理、被别处引用，却**没有任何 session 会加载它**，与「根本不生效的规则」无法区分——直到出事。这是脚手架自造的陷阱，非作者之错。
+
+Arborist 的活样本就在 `workflow.md`：SessionStart hook（`.claude/hooks/session-start.py` → `_build_workflow_overview`）只注入 `## Phase Index`→`## Phase 1: Plan` **一个范围**；每轮 breadcrumb（`inject-workflow-state.py`）只发 Phase Index 内的 `[workflow-state:*]` 块。而**定制层贴在 `## Core Principles` 之后 → 两个注入路径都够不着 → 定制层正文不被任何 session 自动加载**。
+
+⇒ 放置纪律（`workflow-customization.md` 已落地为清单）：
+
+- **正文**（策略/判据全文）留定制层：版本化、可被 guide 引用。
+- **入口**：凡「必须到达每个 session」的规则，在**被注入范围内**（Phase Index 段）或对应 step 的 `get_context.py --mode phase --step X.Y` 详情里，留一行 `- [local]` 指针。
+- **格式硬约束**：入口必须是 `- [local] …` **列表项**。`_strip_breadcrumb_tag_blocks` 把**行首** `[xxx]` 当 tag 剥掉——裸行 `[local] …` 的标签会被吃掉，`- [local] …`（前缀 `- `）整行保留。
+- **机械核对**（别肉眼估）：import hook 模块 → 打印它构建的 overview → grep 关键字断言命中。片段见 `workflow-customization.md` 文末「注入放置验证片段」。这就是给「放对了吗」这道荣誉制门配一个机械产物（参 [`verification-and-gates`](./verification-and-gates.md)）。
 
 ## 绝不进入被同步文件的东西（结构性排除，机械可保证）
 

@@ -5,7 +5,7 @@
 | 簇 | 文件 | 一句话 |
 |---|---|---|
 | T1 | [agent-and-llm-testing.md](./agent-and-llm-testing.md) | LLM 工具选择随机 → N+1 变体矩阵 + 真 provider 随机 smoke + force-pick + mock 不烧 token |
-| T2 | [verification-discipline.md](./verification-discipline.md) | 绿≠可发布；回归用 baseline-diff；feature+test 同 commit |
+| T2 | [verification-discipline.md](./verification-discipline.md) | 绿≠可发布；回归用 baseline-diff；feature+test 同 commit；门触发钉在 hazard 上 |
 | T3+T6 | [contracts-and-drift.md](./contracts-and-drift.md) | 跨边界契约单一真源 + 双向 drift 门 + parity 测试；数据字段同 scope / 预留字段需读者 / 双路径 parity |
 | T4 | [mr-and-git-discipline.md](./mr-and-git-discipline.md) | 机械改动拆独立 commit；格式化淹没 review → path-scope clean MR |
 | T5 | [dependency-and-migration.md](./dependency-and-migration.md) | vendor pin/阶段化；4 级 fallback 阶梯；adapter/绞杀者；DSL vs 原生 |

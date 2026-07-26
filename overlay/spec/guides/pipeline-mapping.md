@@ -19,7 +19,7 @@
 | 10a OpenSpec.verify | **Phase 2.2** 逐条核对 `prd.md` 验收标准 | 无正式 spec，弱化版 |
 | 10b verification-before-completion | **Phase 2.2** SP（与 trellis-check 并列双 lens） | |
 | 11 requesting-code-review | **Phase 2.2/3** `/code-review`(+`/security-review`)+SP `requesting`/`receiving` | |
-| 11.1 toTestTeam smoke | `verification-and-gates.md` 人工 smoke（web 前端用 playwright/webapp-testing） | full 建议 |
+| 11.1 toTestTeam smoke | `verification-and-gates.md` 人工 smoke（web 前端用 playwright/webapp-testing） | 风险触发：(a) 用户可见/外部接口 或 (b) 依赖框架/服务器运行时默认（任一命中）；(b) 命中的纯后端不豁免 |
 | 12 finishing-a-development-branch | workflow.md **Phase 3.4** = defer <project> `/commit` `/pr` + 发布列车 | MR→当期 release |
 | 13 OpenSpec.archive | `task.py archive` + **Multica WIMTB**（after_archive hook） | change 冻结→任务文档冻结 |
 | 14 RepoMem.merge（HITL） | workflow.md **3.3** HITL 晋升门 + Challenge-before-ack + `repomem-doc-boundary.md` | |
