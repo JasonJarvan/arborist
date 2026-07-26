@@ -1,0 +1,146 @@
+version: 1
+
+read_first:
+  hard:
+    - <REPO_ROOT>/.trellis/workflow.md
+    - <REPO_ROOT>/.trellis/spec/guides/roles-and-tiering.md
+    - <REPO_ROOT>/.trellis/spec/guides/execution-policy.md
+    - <REPO_ROOT>/.trellis/spec/guides/sendbox.md
+  soft: []
+
+brand_routing:
+  task_executing_roles:
+    - Impler
+    - SubOrche
+    - Reviewer
+  supported_brands:
+    - codex
+    - claude-code
+  same_brand_policy: strict
+  route_policies:
+    codex:
+      fast:
+        implement:
+          policy_id: codex-fast-implement
+          route_fragment: |
+            Run implementation and every delegated step on Codex. Select the model from Codex project configuration or the invocation.
+          agent: null
+          model: null
+        explore:
+          policy_id: codex-fast-explore
+          route_fragment: |
+            Run exploration and every delegated step on Codex. Select the model from Codex project configuration or the invocation.
+          agent: null
+          model: null
+        check:
+          policy_id: codex-fast-check
+          route_fragment: |
+            Run checking and every delegated step on Codex. Select the model from Codex project configuration or the invocation.
+          agent: null
+          model: null
+        challenge:
+          policy_id: codex-fast-challenge
+          route_fragment: |
+            Run challenge review and every delegated step on Codex. Select the model from Codex project configuration or the invocation.
+          agent: null
+          model: null
+        research:
+          policy_id: codex-fast-research
+          route_fragment: |
+            Run research and every delegated step on Codex. Select the model from Codex project configuration or the invocation.
+          agent: null
+          model: null
+      full:
+        implement:
+          policy_id: codex-full-implement
+          route_fragment: |
+            Run implementation and every delegated step on Codex. Select the model from Codex project configuration or the invocation.
+          agent: null
+          model: null
+        explore:
+          policy_id: codex-full-explore
+          route_fragment: |
+            Run exploration and every delegated step on Codex. Select the model from Codex project configuration or the invocation.
+          agent: null
+          model: null
+        check:
+          policy_id: codex-full-check
+          route_fragment: |
+            Run checking and every delegated step on Codex. Select the model from Codex project configuration or the invocation.
+          agent: null
+          model: null
+        challenge:
+          policy_id: codex-full-challenge
+          route_fragment: |
+            Run challenge review and every delegated step on Codex. Select the model from Codex project configuration or the invocation.
+          agent: null
+          model: null
+        research:
+          policy_id: codex-full-research
+          route_fragment: |
+            Run research and every delegated step on Codex. Select the model from Codex project configuration or the invocation.
+          agent: null
+          model: null
+    claude-code:
+      fast:
+        implement:
+          policy_id: claude-code-fast-implement
+          route_fragment: |
+            Use the Claude Code agent trellis-implement with the Sonnet model for fast-lane implementation.
+          agent: trellis-implement
+          model: sonnet
+        explore:
+          policy_id: claude-code-fast-explore
+          route_fragment: |
+            Use the Claude Code agent trellis-explore with the Sonnet model for fast-lane exploration.
+          agent: trellis-explore
+          model: sonnet
+        check:
+          policy_id: claude-code-fast-check
+          route_fragment: |
+            Use the Claude Code agent trellis-check with the Opus model for fast-lane checking.
+          agent: trellis-check
+          model: opus
+        challenge:
+          policy_id: claude-code-fast-challenge
+          route_fragment: |
+            Use the Claude Code agent trellis-check with the Opus model for fast-lane challenge review.
+          agent: trellis-check
+          model: opus
+        research:
+          policy_id: claude-code-fast-research
+          route_fragment: |
+            Use the Claude Code agent trellis-research with the Sonnet model for fast-lane research.
+          agent: trellis-research
+          model: sonnet
+      full:
+        implement:
+          policy_id: claude-code-full-implement
+          route_fragment: |
+            Use the Claude Code agent trellis-implement-full with the Opus model for full-lane implementation.
+          agent: trellis-implement-full
+          model: opus
+        explore:
+          policy_id: claude-code-full-explore
+          route_fragment: |
+            Use the Claude Code agent trellis-explore with the Sonnet model for full-lane exploration.
+          agent: trellis-explore
+          model: sonnet
+        check:
+          policy_id: claude-code-full-check
+          route_fragment: |
+            Use the Claude Code agent trellis-check with the Opus model for full-lane checking.
+          agent: trellis-check
+          model: opus
+        challenge:
+          policy_id: claude-code-full-challenge
+          route_fragment: |
+            Use the Claude Code agent trellis-check with the Opus model for full-lane challenge review.
+          agent: trellis-check
+          model: opus
+        research:
+          policy_id: claude-code-full-research
+          route_fragment: |
+            Use the Claude Code agent trellis-research with the Sonnet model for full-lane research.
+          agent: trellis-research
+          model: sonnet

@@ -1,16 +1,16 @@
 {
   "projects": [
     {
-      "project_id": "b5538efa9699",
-      "path": "/absolute/path/to/example-repo",
+      "project_id": "<project-id>",
+      "path": "<absolute-project-path>",
       "name": "example-repo",
       "agents": [
         {
           "name": "example-impler",
           "role": "impler",
-          "brand": "claude-code",
+          "brand": "<actual-brand>",
           "state": "active",
-          "session_id": "00000000-0000-4000-8000-000000000000"
+          "session_id": "<actual-session-id>"
         }
       ]
     }

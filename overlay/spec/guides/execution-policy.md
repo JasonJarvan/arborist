@@ -2,6 +2,14 @@
 
 > Trellis workflow.md 各步的执行门控与跳过纪律。吸纳自 HarnessStack § Execution Policy / Skip Mechanism / Lane Tiering。
 
+## Brand gate（先于执行门控）
+
+`effective_subagent_brand = impler.spec.brand`
+
+这个 same-brand gate 适用于实现、TDD、重构、Explore、check、challenge 与 research，且先于下述 auto/ask-first/HITL 判断。执行角色 handoff 缺少 recipient brand、brand 不在宿主支持列表、实际 ATUI 与注册声明不一致，或计划中的 provider 产生 **brand mismatch**，都必须 fail closed：不创建 subagent、不猜默认值、不伪装成另一 brand。修正注册信息或 handoff 后才可继续。
+
+Human 直接运行、无需 A2A 发现或路由的 harness 会话属于注册豁免；它们没有“缺注册 brand”的 gate 错误。该豁免不允许一个已参与路由的 Impler 绕过 same-brand 校验。
+
 ## 四级门控（每步一个 policy）
 
 - **auto** — 直接执行，不问。用于只读/脚手架/幂等步（research-first、RepoMem.read、建 task 目录、get_context）。
