@@ -67,6 +67,8 @@ Into an otherwise untouched repo, `adopt.sh` lays down — all hidden from your 
 
 - `.trellis/spec/guides/` — the discipline + methodology guides ([index](./overlay/spec/guides/index.md)), read on demand by your agent during Plan/Execute/Finish.
 - `.trellis/workflow.md` — after you paste the [customization block](./overlay/workflow-customization.md), the pipeline (gates, verification topology, promotion gate) is live.
+- `AGENTS.md` + the workflow Phase Index — matching `ARBORIST-BRAND-COMPAT:v1` managed blocks keep Codex and Claude Code on truthful same-brand subagent chains.
+- `.claude/agents/trellis-implement-full.md` + `trellis-explore.md` — fixed Opus/Sonnet routing for Claude Code without a global subagent-model environment variable.
 - `.work_context/` — sendbox (directed handoff letters) + Dashboard (pending-actions projection) scaffolds.
 - `.harness-vcs/` + `hgit` — a separate local history for the harness, so `hgit log` / `hgit checkout <sha>` roll changes back independent of your product `git`.
 
@@ -136,8 +138,11 @@ Replace placeholders when adopting: `<REPO_ROOT>` (your repo's absolute path), t
 ```
 overlay/spec/guides/            # discipline + methodology guides (the core)
 overlay/scripts/                # trellis_multica_sync.py (env-configured) + hgit
+overlay/project-instructions/   # Codex-visible managed instruction sources
+overlay/platform-templates/     # platform-specific managed agent templates
 overlay/work_context-templates/ # sendbox (toAgent/toHuman) + Dashboard scaffolds
 overlay/workflow-customization.md  # the workflow.md customization block
+scripts/                        # brand-compat installer + validator
 skills/arborist-sync/              # bidirectional overlay sync (de-privatize + conflict mediation)
 INSTALL.md · adopt.sh · ADOPT.md   # install prompt + one-shot adopt + guide
 ```

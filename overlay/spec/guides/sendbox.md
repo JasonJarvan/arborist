@@ -2,6 +2,20 @@
 
 > 角色间（L4 RootOrche / L3 SubOrche / L2 Impler / L1 subagent）的异步文件交办。操作用 **`sendbox-protocol` skill**（handoff/inherit verbs）；本篇是 <project> 宿主配置 + **信的命名/frontmatter 规范**。吸纳自 HarnessStack longterm § Cross-Session Sendbox Convention。
 
+## Handoff brand contract
+
+交给 Impler、SubOrche、Reviewer 等任务执行角色的 handoff 必须携带顶层 `recipient_brand`。生成器只用它与 `lane`、`task_kind` 从 `brand_routing.route_policies` 精确选择 leaf，不从作者 brand、模型名、目录名或旧信正文推断：
+
+`effective_subagent_brand = impler.spec.brand`
+
+- `recipient_brand: codex`：implement/TDD/refactor/Explore/check/challenge/research 全部路由到 Codex；不得生成要求 Claude 或 Claude Code 执行这些工作的指令。
+- `recipient_brand: claude-code`：使用 Claude Code 路由，并保持宿主配置的 lane/agent/model 档位。
+- brand 缺失、未知或生成结果出现 brand mismatch：handoff/inherit 都必须 fail closed，列出支持值并要求修正；不得补默认值或跨 brand fallback。
+
+Human 收件人若不执行 task，可以不带 brand；一旦 handoff 让收件人承担执行角色，brand 即为必填。
+
+宿主配置必须采用 cc-sendbox 0.6 的 `brand_routing` schema：`task_executing_roles`、`supported_brands`、`same_brand_policy: strict`，以及精确三层 `route_policies.<brand>.<lane>.<task-kind>`。每个 leaf 都必须有全局唯一 `policy_id`、非空 `route_fragment` 和显式 `agent` / `model`（由 runtime 决定时写 YAML `null`）。缺 tuple、重复 ID 或旧 schema 都是不兼容配置，必须在写信前失败。
+
 ## 目录结构（`toAgent/` + `toHuman/`）
 ```
 .work_context/sendbox/
@@ -29,6 +43,13 @@ recipients:
   - role: <Impler|SubOrche|RootOrche|User|TestTeam>
     purpose: <为何读这封>
     lifecycle: <终止条件，如 "L2 started" / "signed off">
+recipient_brand: <claude-code|codex>  # task-executing recipient 必填；human-only 可省
+route_policy:                         # task-executing recipient 必填
+  policy_id: <selected-policy-id>
+  lane: <fast|full>
+  task_kind: <implement|explore|check|challenge|research>
+  agent: <selected-agent-or-null>
+  model: <selected-model-or-null>
 on_lifecycle_end: burn | archive | wimtb   # wimtb=蒸馏进对应 Multica issue 后 rm
 task: <L2/L3 task 目录>
 multica_issue: <task.json.meta.multica_issue，如有>
@@ -42,6 +63,7 @@ created_in: <来源角色/session>
 1. **`read_first`（绝对路径，硬性 N19）**：`<REPO_ROOT>/.trellis/workflow.md` + 相关 guides + 该任务 `prd.md`（worktree/独立 session 看不到被 exclude 的 harness overlay，相对路径悬空）。
 2. **process-completeness（N20）**：遵标准 Pipeline，或逐条声明短路的 step（接收方抄进自己 task 记录）；不得静默省略 TDD/security-scan/HITL。
 3. **任务引用** + Multica issue。
+4. **recipient brand + route block**：顶层 `recipient_brand` 与 `route_policy` 必须来自 `_handoff-config.yaml` 的精确 `(brand, lane, task_kind)` leaf；`policy_id` / `agent` / `model` 必须一致，正文只渲染该 leaf 的 `route_fragment`。
 
 ## 自动路由 vs 人确认（durable 边界，A2A 自动化判据）
 交办可自动化（若接入了某个瞬态通信后端）到什么程度，按下列切分：
@@ -56,10 +78,11 @@ created_in: <来源角色/session>
 
 ## Inherit（接收方"继承"handoff——handoff 的读取侧）
 handoff 是**写**（派活方投信）；inherit 是**读/接管**（接收会话"继承"这封信开工）。接收角色开一个新 session 后：
-1. **读 `read_first`**（信里列的绝对路径：workflow.md + 相关 guides + 该任务 prd）——绝对路径保证 worktree/独立 session 也能加载被 exclude 的 harness overlay（N19）。
-2. **按 process-completeness 声明续流程**：遵 workflow.md 标准 Pipeline，或采纳信里逐条声明的短路 step（抄进自己 task 记录，不静默绕门）。
-3. **认领任务**：从信的 `task` 字段定位 L2/L3 task 目录 + Multica issue，进入对应 Phase（如"从 Phase 2 TDD 入"）。
-4. 完成后按信尾写 `from-<task>-done.md` 回投来源角色。
+1. **校验 recipient brand + route policy**：执行角色必须有受支持的顶层 `recipient_brand`，且与当前 actual runtime brand 一致；再按 frontmatter 的 lane/task_kind 重解 config leaf，并核对 `policy_id` / `agent` / `model` 与正文 Selected route。任一不一致即停止继承。
+2. **读 `read_first`**（信里列的绝对路径：workflow.md + 相关 guides + 该任务 prd）——绝对路径保证 worktree/独立 session 也能加载被 exclude 的 harness overlay（N19）。
+3. **按 process-completeness 声明续流程**：遵 workflow.md 标准 Pipeline，或采纳信里逐条声明的短路 step（抄进自己 task 记录，不静默绕门）。
+4. **认领任务**：从信的 `task` 字段定位 L2/L3 task 目录 + Multica issue，进入对应 Phase（如"从 Phase 2 TDD 入"）。
+5. 完成后按信尾写 `from-<task>-done.md` 回投来源角色。
 > handoff/inherit 是一对动作，操作可由 `sendbox-protocol` skill 的 handoff/inherit verbs 执行；本节定义 Arborist 语义。
 
 ## 与 Trellis 的关系

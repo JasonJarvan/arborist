@@ -11,6 +11,14 @@
 
 （与 **Lane(fast/full) 正交**：L1–L4 是角色/任务结构；fast/full 是文档集大小。）
 
+## L2→L1 brand 不变式
+
+`effective_subagent_brand = impler.spec.brand`
+
+Impler 派出的 implement、TDD、refactor、Explore、check、challenge、research 等 L1 工作都继承 Impler 在 AgentTUI 注册表中如实登记的 brand，形成 **same-brand** chain。`brand=codex` 时全链路使用 Codex subagents；`brand=claude-code` 时全链路使用 Claude Code subagents。模型档位只能在选定 brand 内决定，不能用另一个 provider 的模型名把工作跨 brand 转发。
+
+派活前必须先解析 Impler 的实际 brand。brand 缺失、未知，或 dispatch provider 与 Impler brand 发生 **brand mismatch** 时必须 **fail closed**：停止派活并修正注册或 handoff；不得猜测默认 brand、不得伪装兼容、不得降级为跨 brand 路由。
+
 ## 各级跑哪些 Pipeline steps
 
 - **L4 RootOrche**：Phase 1 research-first + brainstorm（与 human）→ 分解 L3/L2 任务、定 Lane → 派活（sendbox）→ Phase 3 **轻量 accept**（跨任务一致性 + 翻 ADR `proposed→accepted` + commit/push/MR 对 human；见下「收尾职责分层」）。**不**跑 L2 的 TDD loop、**不**替 L2 做本任务收尾起草。

@@ -3,7 +3,12 @@
 # 前置：已 `trellis init`；在项目仓根运行 `bash /path/to/Arborist/adopt.sh`。
 set -euo pipefail
 
-SRC="$(cd "$(dirname "$0")" && pwd)/overlay"
+ARBORIST_ROOT="$(cd "$(dirname "$0")" && pwd)"
+SRC="$ARBORIST_ROOT/overlay"
+BRAND_INSTALLER="$ARBORIST_ROOT/scripts/install-brand-compat.py"
+BRAND_VALIDATOR="$ARBORIST_ROOT/scripts/validate_brand_compat.py"
+BRAND_PROJECT_SOURCE="$ARBORIST_ROOT/overlay/project-instructions/brand-compat.md"
+BRAND_WORKFLOW_SOURCE="$ARBORIST_ROOT/overlay/workflow-phase-index-brand-compat.md"
 ROOT="$(pwd)"
 [ -d "$ROOT/.trellis" ] || { echo "✗ 未见 .trellis/ —— 先 trellis init"; exit 1; }
 [ -d "$ROOT/.git" ] || { echo "✗ 不是 git 仓根"; exit 1; }
@@ -27,13 +32,44 @@ mkdir -p "$ROOT/.trellis/spec/guides"
 cp -r "$SRC/spec/guides/." "$ROOT/.trellis/spec/guides/"
 
 echo "→ 铺 scripts + hgit"
-mkdir -p "$ROOT/scripts"; cp "$SRC/scripts/trellis_multica_sync.py" "$ROOT/scripts/"
+mkdir -p "$ROOT/scripts"
+cp "$SRC/scripts/trellis_multica_sync.py" "$ROOT/scripts/"
+cp "$BRAND_INSTALLER" "$BRAND_VALIDATOR" "$ROOT/scripts/"
+chmod +x \
+  "$ROOT/scripts/install-brand-compat.py" \
+  "$ROOT/scripts/validate_brand_compat.py"
 cp "$SRC/scripts/hgit" "$ROOT/hgit"; chmod +x "$ROOT/hgit"
 
 echo "→ 铺 .work_context 模板（不覆盖已存在）"
 mkdir -p "$ROOT/.work_context"
 [ -e "$ROOT/.work_context/sendbox" ]   || cp -r "$SRC/work_context-templates/sendbox"   "$ROOT/.work_context/"
 [ -e "$ROOT/.work_context/Dashboard" ] || cp -r "$SRC/work_context-templates/Dashboard" "$ROOT/.work_context/"
+mkdir -p "$ROOT/.work_context/sendbox"
+[ -e "$ROOT/.work_context/sendbox/_handoff-config.yaml" ] || \
+  cp "$SRC/work_context-templates/sendbox/_handoff-config.yaml" "$ROOT/.work_context/sendbox/"
+[ -e "$ROOT/.work_context/sendbox/_TEMPLATE-handoff.md" ] || \
+  cp "$SRC/work_context-templates/sendbox/_TEMPLATE-handoff.md" "$ROOT/.work_context/sendbox/"
+HANDOFF_CONFIG="$ROOT/.work_context/sendbox/_handoff-config.yaml"
+if ! grep -Eq '^brand_routing:[[:space:]]*$' "$HANDOFF_CONFIG" \
+   || ! grep -Eq '^[[:space:]]+same_brand_policy:[[:space:]]+strict[[:space:]]*$' "$HANDOFF_CONFIG"; then
+  echo "✗ 已存在的 _handoff-config.yaml 不兼容 cc-sendbox brand_routing strict schema；"
+  echo "  Arborist 未覆盖该用户配置。请按 overlay 模板合并后重跑 adopt.sh："
+  echo "  $SRC/work_context-templates/sendbox/_handoff-config.yaml"
+  exit 1
+fi
+
+echo "→ 安装 brand compatibility 双可见块 + Claude agents"
+[ -f "$BRAND_PROJECT_SOURCE" ] && [ -f "$BRAND_WORKFLOW_SOURCE" ] || {
+  echo "✗ brand compatibility source 缺失"
+  exit 1
+}
+python3 "$BRAND_INSTALLER" \
+  --source-tree "$ARBORIST_ROOT" \
+  --target-repo "$ROOT"
+echo "→ 验证 brand compatibility source + target"
+python3 "$ROOT/scripts/validate_brand_compat.py" \
+  --source-tree "$ARBORIST_ROOT" \
+  --target-repo "$ROOT"
 
 echo "→ 写 .git/info/exclude（harness overlay 隐身于产品仓）"
 EXC="$ROOT/.git/info/exclude"
@@ -45,6 +81,8 @@ grep -q "Arborist overlay" "$EXC" 2>/dev/null || cat >> "$EXC" <<'EOF'
 /.mcp.json
 /.codegraph/
 /scripts/trellis_multica_sync.py
+/scripts/install-brand-compat.py
+/scripts/validate_brand_compat.py
 /AGENTS.md
 /hgit
 /.harness-vcs/
@@ -70,7 +108,16 @@ echo "→ 建本地 harness 版本仓 .harness-vcs（无 remote）"
 if [ ! -d "$ROOT/.harness-vcs" ]; then
   git --git-dir="$ROOT/.harness-vcs" --work-tree="$ROOT" init -q
   printf '/*\n' > "$ROOT/.harness-vcs/info/exclude"
-  git --git-dir="$ROOT/.harness-vcs" --work-tree="$ROOT" add -f .trellis scripts/trellis_multica_sync.py hgit .work_context 2>/dev/null || true
+  git --git-dir="$ROOT/.harness-vcs" --work-tree="$ROOT" add -f \
+    .trellis \
+    .claude/agents/trellis-implement-full.md \
+    .claude/agents/trellis-explore.md \
+    AGENTS.md \
+    scripts/trellis_multica_sync.py \
+    scripts/install-brand-compat.py \
+    scripts/validate_brand_compat.py \
+    hgit \
+    .work_context 2>/dev/null || true
   git --git-dir="$ROOT/.harness-vcs" --work-tree="$ROOT" -c user.name=harness-local -c user.email=harness@localhost commit -q -m "baseline: Arborist overlay adopted" || true
 fi
 
@@ -116,7 +163,9 @@ cat <<'NEXT'
 ✓ overlay 已叠加。手动收尾：
   1) 把 overlay/workflow-customization.md 的定制层块粘进 .trellis/workflow.md（Core Principles 后），替换 <占位>。
      并按其尾注调整 Phase 1/2/3（research-first 前置、breadcrumb→SP、验证拓扑、ADR/HITL、defer git、WIMTB）。
-  2) 用 Multica 则设 env：MULTICA_WORKSPACE_ID / TRELLIS_MULTICA_PROJECT_ID，并在 .trellis/config.yaml 挂 hooks + session_auto_commit: false。
-  3) 用 codegraph 则 `codegraph init && codegraph install`。
-  4) 重启 AI session。harness 改动走 ./hgit（log/diff/checkout 回退）。
+  2) brand compatibility 已机械写入 AGENTS.md 与 workflow Phase Index；可跑
+     `python3 scripts/install-brand-compat.py --source-tree /path/to/Arborist --check` 验证。
+  3) 用 Multica 则设 env：MULTICA_WORKSPACE_ID / TRELLIS_MULTICA_PROJECT_ID，并在 .trellis/config.yaml 挂 hooks + session_auto_commit: false。
+  4) 用 codegraph 则 `codegraph init && codegraph install`。
+  5) 重启 AI session。harness 改动走 ./hgit（log/diff/checkout 回退）。
 NEXT

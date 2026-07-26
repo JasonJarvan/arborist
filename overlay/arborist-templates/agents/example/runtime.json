@@ -1,8 +1,8 @@
 {
-  "session_id": "00000000-0000-4000-8000-000000000000",
-  "session_file": "~/.claude/projects/<munged-repo-path>/00000000-0000-4000-8000-000000000000.jsonl",
+  "session_id": "<actual-session-id>",
+  "session_file": "<absolute-session-file-for-actual-brand>",
   "state": "active",
-  "last_seen": "2026-01-01T00:00:00Z",
+  "last_seen": "<iso8601-last-seen>",
   "generation": 1,
   "pane_ref": null
 }

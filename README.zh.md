@@ -79,6 +79,8 @@ bash /tmp/arborist/adopt.sh            # 见 ADOPT.md：铺 guides、装 overlay
 
 - `.trellis/spec/guides/` —— 纪律与方法论 guides（[索引](./overlay/spec/guides/index.md)），agent 在 Plan/Execute/Finish 时按需读。
 - `.trellis/workflow.md` —— 你粘入[定制块](./overlay/workflow-customization.md)后，Pipeline（门控、验证拓扑、晋升门）即生效。
+- `AGENTS.md` + workflow Phase Index —— 两处一致的 `ARBORIST-BRAND-COMPAT:v1` managed block，让 Codex 与 Claude Code 都按真实 brand 保持同品牌 subagent 链。
+- `.claude/agents/trellis-implement-full.md` + `trellis-explore.md` —— Claude Code 的固定 Opus/Sonnet 路由，不依赖全局 subagent model 环境变量。
 - `.work_context/` —— sendbox（定向交办信）+ Dashboard（待办投影）脚手架。
 - `.harness-vcs/` + `hgit` —— harness 专用本地版本仓，`hgit log` / `hgit checkout <sha>` 与产品 `git` 解耦地回退。
 
@@ -166,7 +168,11 @@ overlay/spec/guides/            # 纪律与方法论 guides（本仓核心）
   decisions/TEMPLATE.md         # ADR 模板（带 Origin）
   methodology/                  # 9 簇工程纪律（真实项目提炼）
 overlay/scripts/                # trellis_multica_sync.py（env 配置）+ hgit
+overlay/project-instructions/   # Codex 自动可见 managed 指令源
+overlay/platform-templates/     # 平台专属 managed agent 模板
 overlay/work_context-templates/ # sendbox（toAgent/toHuman）+ Dashboard 脚手架
+overlay/workflow-customization.md # workflow.md 定制层
+scripts/                        # brand compatibility installer + validator
 skills/arborist-sync/              # 双向 overlay 同步（去隐私 + 冲突调解）
 adopt.sh / ADOPT.md             # 一键 adopt + 说明
 ```

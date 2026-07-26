@@ -3,6 +3,13 @@ recipients:
   - role: <Impler|SubOrche|RootOrche|User|TestTeam>
     purpose: <为何读这封>
     lifecycle: <终止条件，如 "L2 started" / "signed off">
+recipient_brand: <claude-code|codex>
+route_policy:
+  policy_id: <selected-policy-id>
+  lane: <fast|full>
+  task_kind: <implement|explore|check|challenge|research>
+  agent: <selected-agent-or-null>
+  model: <selected-model-or-null>
 on_lifecycle_end: burn | archive | wimtb
 task: <L2/L3 task 目录>
 multica_issue: <task.json.meta.multica_issue，如有>
@@ -10,6 +17,23 @@ created: <YYYY-MM-DD>
 created_in: <来源角色/session>
 ---
 # from-<task>-handoff
+
+## Recipient brand（执行角色必填）
+顶层 `recipient_brand` 是接收者的 actual runtime brand，不是作者 brand 或期望模型。生成前以 `(recipient_brand, lane, task_kind)` 从 `_handoff-config.yaml` 精确选择一个 `route_policy`；缺失、未知或 brand mismatch 时停止，不猜默认值。
+
+- `recipient_brand: codex`：implement/TDD/refactor/Explore/check/challenge/research 全部使用 Codex。
+- `recipient_brand: claude-code`：fast implement=Sonnet、full implement=`trellis-implement-full`/Opus、Explore=`trellis-explore`/Sonnet、check/challenge=Opus、research=Sonnet。
+
+## Selected route
+
+> policy_id: <selected-policy-id>
+> recipient_brand: <claude-code|codex>
+> lane: <fast|full>
+> task_kind: <implement|explore|check|challenge|research>
+> agent: <selected-agent-or-null>
+> model: <selected-model-or-null>
+
+<selected route_fragment；必须逐字来自 config leaf，且这是正文中唯一 routing 指令>
 
 ## Read first（绝对路径，N19）
 - <REPO_ROOT>/.trellis/workflow.md
