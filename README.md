@@ -122,7 +122,7 @@ The core of Arborist is its discipline + methodology guides, laid into `.trellis
 | [Dashboard](./overlay/spec/guides/dashboard.md) | single projection of "what does the human owe now" across sessions |
 | [AgentTUI registry](./overlay/spec/guides/agenttui-registry.md) | peer discovery for concurrent sessions: `.arborist/` cascade + spec/runtime schema + declared/derived state model + self-registration |
 | [Tool registry](./overlay/spec/guides/tool-registry.md) | optional-capability plugin layer: `.arborist/tools/` cascade + `tool.json` schema + required/optional provisioning with per-tool fallbacks |
-| [Knowledge close-out](./overlay/spec/guides/knowledge-closeout.md) | post-delivery repo-wide knowledge-consistency gate: fact-surface matrix + two-phase report + trigger tiering (run by the close-out owner; covers what trellis-check's change-scope misses) |
+| [Knowledge close-out](./overlay/spec/guides/knowledge-closeout.md) | post-delivery repo-wide knowledge-consistency gate: fact-surface matrix + two-phase report + trigger tiering (run by the close-out owner; covers what trellis-check's change-scope misses); manually triggerable from any lane via `/neat`, `neat skill`, or `洁癖 skill` |
 | [HS 15-step mapping](./overlay/spec/guides/pipeline-mapping.md) | HarnessStack 15-step → Trellis phases / guides crosswalk |
 | [Methodology clusters](./overlay/spec/guides/methodology/index.md) | 9 clusters (LLM testing / verification / contract drift / MR / dependencies / errors / local docs / handoff attribution …) |
 | [ADR template](./overlay/spec/guides/decisions/TEMPLATE.md) | architecture decision record (three-gate self-check + `Origin` traceability) |

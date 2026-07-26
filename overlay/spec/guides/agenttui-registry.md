@@ -41,8 +41,8 @@
 |---|---|
 | `session_id` | **主键 / 触达句柄**。`claude -p --resume <session_id> "<msg>"` 向该会话**追加**一条消息并让其在自身完整上下文里处理（实测：append 非 fork，回复走调用方 stdout）。触达前须按 §3 末判活选通道 |
 | `session_file` | 会话落盘**绝对路径**（判活探针，令读者零 brand 知识）。Claude Code：`~/.claude/projects/<munged-repo-path>/<session_id>.jsonl`（逐轮 append，mtime = 最近活动，已实证）；Codex：`~/.codex/sessions/YYYY/MM/DD/rollout-<ISO时间戳>-<session_id>.jsonl`（逐轮 append，mtime = 最近活动，**已实证**：`codex exec resume` 续同一 rollout、mtime 随 turn 递增、不新建文件，与 Claude Code 同——见 [ADR-0003](./decisions/0003-cross-session-reach-semantics.md) 实测边界） |
-| `state` | **声明态**：`active` / `stopped`（`idle` 为保留枚举值，MVP 不自写，见 §3） |
-| `last_seen` | 心跳时间戳（ISO8601，可信触点顺带刷新） |
+| `state` | **声明态**：`active` / `stopped`（`idle` 为保留枚举值，MVP 不自写，见 §3）。`stopped` 有**写入门槛**（仅会话真正结束才写，见 §3/§4）且遇活转录矛盾会被派生规则**降级为 contradiction**——声明态非确知，读者据 §3 现算，不无条件采信 `stopped` |
+| `last_seen` | 心跳时间戳（ISO8601，可信触点顺带刷新）。**写 `stopped` 时也须记 `last_seen`**——它是活转录矛盾检测的基准：若 `session_file` mtime 晚于该 `stopped` 写入记录的 `last_seen`（容小段文件系统时钟偏移），即声明与派生活性证据矛盾（见 §3） |
 | `generation` | 重启代数（同一 `name` 重启/换 session 时 +1） |
 | `pane_ref` | 可选：终端复用器 pane/tab 引用（留给未来编排，MVP 置 `null`） |
 
@@ -62,19 +62,29 @@
 
 ## 3. 状态模型（读表方必读）
 
-- **声明态**（agent 自写，仅两个可信触点）：`active` —— session start 自登记及心跳触点写；`stopped` —— 仅**干净收尾**时写。崩溃/关终端没有回调，崩溃路径的 `stopped` 永远不会被写——这是结构性事实，读者不得假设声明态完备。
+- **声明态**（agent 自写，仅两个可信触点）：`active` —— session start 自登记及心跳触点写；`stopped` —— **仅会话真正结束时写**（写入门槛见下「stopped 写入门槛（Guard）」；含糊措辞「干净收尾」已作废，因它把任务生命周期事件误当会话结束）。崩溃/关终端没有回调，崩溃路径的 `stopped` 永远不会被写——这是结构性事实，读者不得假设声明态完备；且自写的 `stopped` 可因范畴错误而失真（见下 reconcile），读者亦不得无条件采信。
 - **`idle` 是派生态**：agent 空闲时不在运行，物理上无法自写。schema 保留该枚举值，兼容未来平台 hook 机械写入的增强（留验证的增强路径，MVP 不依赖）。
 - **有效态 = f(声明态, last_seen 新鲜度, session_file mtime 探针)**，由**读者读表时现算**（无守护进程，观测退化为读时派生）：
 
 | 条件（按序判定） | 有效态 |
 |---|---|
-| 声明 `stopped` | stopped |
+| 声明 `stopped`，但 `session_file` 存在且转录 mtime 落在**新鲜窗口**内（距今 < idle 阈值，**或**晚于该 `stopped` 写入记录的 `last_seen`，容小段文件系统时钟偏移） | **contradiction —— 可疑 stopped / 疑似仍活**：reader 视其为 reachable/active；validator 报该不一致叶子；owner 以 heartbeat 修复；**gardener 复核前不得据此 GC** |
+| 声明 `stopped`（无上述矛盾证据） | stopped |
 | `session_file` mtime 距今 < idle 阈值 | active |
 | mtime 距今 ≥ idle 阈值 且 < stale 阈值 | idle（推定） |
 | mtime 距今 ≥ stale 阈值，或 `session_file` 不存在 | stopped/stale（推定；gardener GC 候选） |
 
 - 阈值：idle **15min** / stale **24h**，均为**建议默认值**，按项目节奏可调。`session_file` 不可读时退用 `last_seen` 作新鲜度依据（较粗：只反映可信触点，不反映逐轮活动）。
 - **探针局限（必须知道）**：会话落盘是 open-append-close 写入，空闲期无进程持有其 fd ⇒ 无法经 fd 把 pid 映射回 session；mtime 停跳时，「idle 但终端还开着」与「已关终端」**不可区分**。因此 idle 与 stopped/stale 一律是**推定，不是确知**。
+- **stopped 写入门槛（Guard）**：`stopped` 是**会话生命周期**信号，不是任务生命周期信号。
+  - **会话真正结束**才可写 `stopped` = AgentTUI teardown，**或** Mode-B 角色交接（sendbox inheritance：承担者换人、当前会话不再续该角色）。
+  - 明确**不构成**会话结束、因而**不得**触发 `stopped` 写入的事件：任务完成 / 任务 archive / 末条 assistant 回复 / 等待用户输入 / prompt 空闲 / compact / 上下文重置。这些是任务或轮次事件，会话线程仍会继续处理后续 turn。
+  - **session 不得在自身仍是活 session 时写 `stopped`**——防「archive 完顺手标 `stopped` 却继续处理用户 turn」这一任务-会话生命周期**范畴错误**（本 guard 的直接由来）。收尾（任务/里程碑洁癖收口）只刷 `last_seen` 心跳、更新 `task`，**不写 `stopped`**。
+  - 若配备生命周期命令（adopter 自置），`stop` 应要求**显式会话结束确认**（confirm-session-exit），`heartbeat` 应同时刷项目级 leaf 与全局 index。具体命令名/路径属 adopter 本地，不入本规范。
+- **活转录矛盾检测（reconcile：declared `stopped` 不再无条件优先）**：读者现算有效态时，先按上表首行做 reconcile——当声明 `stopped` 与**新鲜 live 派生证据**矛盾（`session_file` 存在且转录 mtime 落在**新鲜窗口**内）时，**不采信 `stopped`**，标记为 **contradiction**（可疑 stopped / 疑似仍活），有效态视为 reachable/active。
+  - **新鲜窗口的判定**（复用 §2.2 已实证的 mtime 探针，Claude Code 与 Codex 同）：`stat` 该 `session_file` 的 mtime，满足任一即算「新鲜、与 stopped 矛盾」——(a) mtime 距今 < idle 阈值（转录近期仍在逐轮 append）；(b) mtime **晚于**该 `stopped` 写入时记录的 `last_seen`（容小段文件系统时钟偏移）——即「声明停后转录还在写」。`session_file` 不可读时退用 `last_seen`（较粗），无矛盾证据可判则回落到 stopped。
+  - **判据 (a) 的预期短暂误报窗（须知，免得读者惊讶）**：刚**干净 teardown** 的会话，末轮留下的 mtime 在其后一个 idle 窗口内仍是「近期」——此时「末轮遗留的新鲜 mtime」与「仍在 append」不可区分，判据 (a) 会把这个**真已结束**的会话误判为 contradiction。这是预期的**短暂误报窗**，危害低：越过 idle 阈值后 mtime 停跳、判据 (a) 不再命中，有效态自愈回落到 stopped；期间保守视为 reachable/active、不 GC，也只是延后清理而非误删。判据 (b)（mtime 晚于 stopped 的 `last_seen`）才是**精确**的范畴错误探测器——只在「声明停后转录确实又写了」时命中，无此误报窗。
+  - **对 reader / gardener 的约束**：contradiction 条目**不得据以 GC**，gardener 须先复核（如经 §3 末通道触达 owner、或等新鲜窗口过后 mtime 停跳再判）；validator 应把该不一致叶子报出；owner（本人）下一个可信触点以 heartbeat 修复（改回 `active` 并刷 `last_seen`）。参见 [ADR-0002](./decisions/0002-agenttui-declared-derived-state-model.md) Amendment。
 - **GC 保守原则**：gardener 清理的是**注册表条目，不是会话**；条目可由本人随时重建，误删无害——但仍应保守（只 GC 超 stale 阈值者），避免把仍活跃的同伴从发现视野里抹掉。
 - **Human-direct 豁免**：由 human 直接启动、且不需要被其他 AgentTUI 发现或路由的 **human-direct harness** 会话不属于注册对象。它们 **must not be reported as unregistered**，也不得因为没有 `spec.json` 被 validator 或 gardener GC 当作残缺注册项。会话一旦要参与 A2A 发现或路由，豁免即结束，并须按 actual runtime brand 自登记。
 
@@ -104,7 +114,7 @@
 - **自登记（主路径）**：AgentTUI 启动读 harness 后，**自建**整条 leaf（spec.json + runtime.json，单写者原子写）。自建覆盖所有角色——rootorc / gardener 没有 handoff 信，登记不能挂在派活方身上。
 - **handoff 供素材**：经 sendbox handoff 而来的会话，信中 role / task / description 直接用作 spec.json 素材；派活方可在信中提醒「按注册表规范自登记」，但**不代写**——session_id 在会话创建前不存在，派活方物理上写不了。
 - **心跳**：处理 turn 的可信触点（每轮收尾、阶段切换等）顺带刷 `runtime.json.last_seen`；约定驱动，无守护进程。
-- **收尾**：干净结束时写 `state: "stopped"`。
+- **收尾（任务/里程碑）≠ 会话结束**：任务完成 / archive / 末条回复 / 等用户输入 / compact / 上下文重置**都不是会话结束**，此时只刷 `last_seen` 心跳、**不写 `stopped`**。`state: "stopped"` 仅在**会话真正结束**（AgentTUI teardown 或 Mode-B 角色交接、当前会话不再续任）时写；**session 不得在自身仍活时标 `stopped`**（见 §3「stopped 写入门槛」）。误标的 `stopped` 会被读者 reconcile 成 contradiction（§3），且下一次可信触点应由本人 heartbeat 改回。
 - **gardener**：持有并更新全局 `index.json`（跨项目摘要汇总）；按 §3 保守 GC stale 条目；校验 name 唯一；探针遗留项由 gardener 实测后回填本 guide：codex mtime **已实证**（见 §2.2）；**待实证**——无桥接自识别兜底（nonce grep，§5.2）、跨目录/跨项目 `--resume` lookup（§3 末）。
 - **rootorc / suborc / impler**：登记自身、读表知同伴、专注本职；**subimpler 不建条目**。
 - **归属边界（跨 ATUI 别抢活）**：ATUI 只管自己 lane 的活；别的 ATUI 就其自身 lane 的**通报**（`fyi`）是 FYI 非交办，默认「知道了」不接手；看见别人 lane 的问题 → 告诉归属方或 human。权威定义见 [roles-and-tiering.md](./roles-and-tiering.md)「ATUI 归属边界」。
@@ -126,6 +136,7 @@
 5. 同一 `name` 重启换新 session：更新 runtime.json（新 session_id / session_file，`generation` +1），spec.json 不动（`lineage` 是稳态身份，重启不变）。
 6. （可选）把自己追加进全局 `~/.arborist/index.json` 摘要（含 `lineage`）；不追加则留给 gardener 汇总。
 7. **经继承接管（sendbox Mode B）**：若本会话是经 inheritance-mode handoff 接管某角色（承担者换人、角色不变），spec.json 写 `lineage = 前任 lineage + 1`、`lineage_origin = 前任 session_id + 交接信名`（面包屑，非权威，见 §2.1）；`generation` 仍按本会话自身重启计（新会话即 1，与 lineage 无关）。
+8. **写 `stopped` 的门槛（自登记指南硬约束）**：只有**会话真正结束**（AgentTUI teardown 或 Mode-B 角色交接、当前会话不再续任）才写 `state: "stopped"`——任务完成 / archive / 末条回复 / 等用户输入 / prompt 空闲 / compact / 上下文重置**都不是会话结束**（定义见 §3「stopped 写入门槛」）。**严禁在本会话仍将继续处理 turn 时标 `stopped`**；这类场景只刷 `last_seen` 心跳。**修复误标**：本人下一个可信触点直接把 `state` 改回 `active` 并刷 `last_seen`（heartbeat 同步项目 leaf 与全局 index）；gardener 复核到 contradiction 条目时亦按此修复、不 GC。
 
 ## 6. 许可说明
 

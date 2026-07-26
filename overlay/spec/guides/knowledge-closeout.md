@@ -3,9 +3,23 @@
 > 可选收尾门：`trellis-check` 只审**任务改动面**，此门补审「本次改动**连累**到的、改动面外的文档/规则/记忆是否还在说旧话」。**由收尾方自跑**——full lane 即 L2 Impler 收尾起草时自服务（见 [ADR-0004](./decisions/0004-closeout-split-l2-draft-l4-accept.md) 收尾职责分层），**不回弹给 rootorc**。
 
 ## §1 触发分级（先判跑不跑，省 token）
+
+**自动分级**（据 lane / 收口点自判）：
 - **full lane / milestone 收口** → 跑。
 - **fast lane** → 跳过，记 Auto-Skip Log（见 [`execution-policy.md`](./execution-policy.md)）。
 - **gardener** → 周期性对 workspace / 跨项目档跑（非单任务触发）。
+
+### 手动触发词表（可移植）
+自动分级之外，用户可在**任意 lane** 显式点名要求跑本收尾门。以下词一律等价，视作对 knowledge-closeout 门的**显式手动触发**：
+
+| 触发词 | 说明 |
+|---|---|
+| `/neat` | 语义命令别名；宿主即使无原生 slash-command 实现，也照此语义当手动触发处理 |
+| `neat skill` | 自然语点名 |
+| `洁癖 skill` | 自然语点名（中文） |
+
+- **显式手动触发覆盖 fast lane 的正常 auto-skip**——任意 lane 收到上述任一词都**跑**收尾门，fast lane 也不例外（此时不记 Auto-Skip，改按门正常两阶段汇报走）。
+- 反向不变：未点名上述词时，自动分级行为**一律照旧**——fast lane 仍正常跳过并记 Auto-Skip Log。
 
 ## §2 事实面矩阵（扫哪、答什么）
 逐面自问「这次改动后它还准吗」，一面一行：

@@ -137,7 +137,7 @@ Arborist 的核心是它的纪律 + 方法论 guides，铺进 `.trellis/spec/gui
 | [Dashboard 待办投影](./overlay/spec/guides/dashboard.md) | 跨 session「此刻轮到人做什么」单一投影 |
 | [AgentTUI 注册表](./overlay/spec/guides/agenttui-registry.md) | 并发 session 同伴发现：`.arborist/` 级联 + spec/runtime schema + 声明/派生状态模型 + 自登记 |
 | [工具注册表](./overlay/spec/guides/tool-registry.md) | 可选能力插件层：`.arborist/tools/` 级联 + `tool.json` schema + required/optional 置备与逐工具 fallback |
-| [知识收尾（洁癖式）](./overlay/spec/guides/knowledge-closeout.md) | 交付后全仓知识一致性门：事实面矩阵 + 两阶段汇报 + 触发分级（收尾方自跑，补 trellis-check 改动面之外） |
+| [知识收尾（洁癖式）](./overlay/spec/guides/knowledge-closeout.md) | 交付后全仓知识一致性门：事实面矩阵 + 两阶段汇报 + 触发分级（收尾方自跑，补 trellis-check 改动面之外）；可在任意 lane 用 `/neat`、`neat skill`、`洁癖 skill` 手动触发 |
 | [HS 15-step 落点映射](./overlay/spec/guides/pipeline-mapping.md) | HarnessStack 15 步 → Trellis 阶段/guides 对照 |
 | [方法论簇](./overlay/spec/guides/methodology/index.md) | 9 簇（LLM 测试 / 验证纪律 / 契约防漂移 / MR / 依赖治理 / 错误处理 / 本地文档 / handoff 归因 …） |
 | [ADR 模板](./overlay/spec/guides/decisions/TEMPLATE.md) | 架构决策记录（三门自检 + `Origin` 溯源） |
