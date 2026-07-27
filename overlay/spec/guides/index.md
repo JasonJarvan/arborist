@@ -34,3 +34,4 @@
 | [0004](./decisions/0004-closeout-split-l2-draft-l4-accept.md) | 收尾职责分层 — L2 起草 / L4 轻量 accept | accepted | rootorc-methodology |
 | [0005](./decisions/0005-agenttui-role-lineage-vs-generation.md) | AgentTUI 注册表补角色继承代数 lineage（与 generation 正交） | accepted | adopter-rootorc-v2 + gardener |
 | [0006](./decisions/0006-runtime-brand-is-routing-authority.md) | actual runtime brand 是 subagent 路由唯一权威 | accepted（+2026-07-26 amend.） | human brand-compat ruling + gardener |
+| [0007](./decisions/0007-agenttui-delivery-contract-pluggable-adapter.md) | AgentTUI 活 pane 投递 = 契约进规范 + 具体传输作可插拔 adapter | accepted | dogfood + rootorc |
