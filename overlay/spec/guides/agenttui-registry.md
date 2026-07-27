@@ -120,6 +120,9 @@
 3. **送达证据必须 message-specific（fail-closed，绝不假阳性）**：注入前**记录目标 transcript 字节边界**；每次发送生成**唯一 nonce**；**仅当**该信封的 nonce marker 出现在边界**之后**才返回 `delivered`，否则返回 `queued-unverified`。pane 命令成功 / pane 存在 / 转录 size 增长 / mtime 变化**都不是**送达证据（忙碌目标会自行增长转录）；**peer 回复是唯一的语义 ACK**。
 4. **fail-closed**：未验证即 `queued-unverified`，绝不当 `delivered`。
 
+- **参考 adapter（随发 · opt-in · 二选一别混）**：
+  - `scripts/agenttui.py`（adopt 铺到 `<repo>/.trellis/scripts/`）是**满足本契约的 operational 参考实现**——按注册表 `pane_ref` 用 `zellij … write-chars --pane-id <目标 pane>` **定向注入**（不靠焦点），带齐上述 4 条；调用见工具表条目 `agenttui-direct`（`python3 .trellis/scripts/agenttui.py {status|send|heartbeat|stop}`，发前可 `--dry-run` 验路由）。**operational 投递一律走它。**
+  - `scripts/agenttui_deliver_zellij.py` 是**契约的 seam 化演示，非 operational**：默认注入器**收 `pane_ref` 却不定向、只写当前焦点 pane**，跨 session / 跨 brand（目标 pane ≠ 焦点 pane）必投错——**未补 `--pane-id` 前不得当跨 pane operational 路**（下游把它误当正道，正是跨 brand 发信「表现不佳 / 不稳定」的根因）。
 - **契约里的 nonce ≠ §5.2 自识别 nonce**（用途不同，勿混淆）：本节的 per-send nonce 是**送达证据**——证明「这一条信封确实进了对方 transcript」；§5.2（自登记步骤 2）的无桥接 nonce grep 是**自识别探针**——本会话往自己终端吐一个随机串、再回自己 brand 目录 grep 定位**自身** `session_id`/`session_file`。前者验对端送达、后者定位本端句柄，各自独立。
 - **证据是 per-send 运行时态，不入注册表**：字节边界 / nonce / marker 均随单次发送产生与消亡，注册表是静态发现表，**不**为其新增字段（`pane_ref` 只存寻址句柄，见 §2.2）。
 - **候选未来 transport（备注，非依赖）**：官方 **Channels** 能把外部事件推进一个已运行的 Claude Code 会话，是一个**候选未来投递 transport**（成熟后可作满足本契约的又一 adapter 后端）；但它当前仍是 **research preview**、且**需会话启动时显式 opt-in**，故**暂不作 Arborist 默认依赖**（与「可插拔 adapter、opt-in、transport 中立」一致）。

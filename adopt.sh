@@ -39,6 +39,10 @@ chmod +x \
   "$ROOT/scripts/install-brand-compat.py" \
   "$ROOT/scripts/validate_brand_compat.py"
 cp "$SRC/scripts/hgit" "$ROOT/hgit"; chmod +x "$ROOT/hgit"
+# AgentTUI 直投 operational adapter（满足 ADR-0007 投递契约；带 --pane-id 定向）。
+# 放 .trellis/scripts/ 而非 scripts/：脚本靠 __file__.parents[2] 定位 repo root，须两级深。
+mkdir -p "$ROOT/.trellis/scripts"
+cp "$SRC/scripts/agenttui.py" "$ROOT/.trellis/scripts/"; chmod +x "$ROOT/.trellis/scripts/agenttui.py"
 
 echo "→ 铺 .work_context 模板（不覆盖已存在）"
 mkdir -p "$ROOT/.work_context"
