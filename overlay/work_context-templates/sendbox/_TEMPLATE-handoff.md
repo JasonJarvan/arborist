@@ -53,4 +53,8 @@ created_in: <来源角色/session>
 <要做什么；验收标准指向 prd.md；Lane=fast|full；L 级别>
 
 ## 回报
-完成后写 `from-<task>-done.md` 到来源角色目录：delivery + MR link + spec/ADR 晋升候选。
+完成后**复制 `<REPO_ROOT>/.work_context/sendbox/_TEMPLATE-done.md`** 写
+`from-<task>-done.md` 到来源角色目录：delivery + MR link + spec/ADR 晋升候选 + landing manifest。
+**发送前必须让该模板里的标准 claim provenance 表通过**
+`python3 <REPO_ROOT>/.trellis/scripts/validate_claim_provenance.py <这封 done 信的绝对路径>`
+（门的语义见 `guides/sendbox.md`「Done 信与验收证据的 claim provenance 门」）。

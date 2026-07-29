@@ -46,14 +46,20 @@ cp "$SRC/scripts/agenttui.py" "$ROOT/.trellis/scripts/"; chmod +x "$ROOT/.trelli
 # brand-capacity observer（单写者容量观测 + 建 Impler 前只读推荐；不启停会话/不改注册/不碰凭证）。
 # 同样靠 __file__.parents[2] 定位 repo root，须放 .trellis/scripts/（两级深）。
 cp "$SRC/scripts/arborist_brand_capacity.py" "$ROOT/.trellis/scripts/"; chmod +x "$ROOT/.trellis/scripts/arborist_brand_capacity.py"
-# harness 机械门 validator 两件（只读校验，无网络、无凭证）：
+# harness 机械门 validator 三件（只读校验，无网络、无凭证）：
 #   validate_adr_numbers.py         —— ADR 四位编号唯一 + ADR 文件对「记规范那个 git」可见
 #                                      （--visibility machine-local|product-git，缺失/歧义 fail closed）
 #   validate_harness_persistence.py —— 具名 durable 路径存在/不被忽略/工作树干净/有 commit，
 #                                      产出 path@commit；远端强度分两档（configured / reachable）
+#   validate_claim_provenance.py    —— done 信 / acceptance evidence 的标准四列表：
+#                                      类别只收 实测|推断、出处非空、推断必声明缺口，
+#                                      且 >=4 行整列复制同一个非「无」缺口即 fail。
+#                                      两个消费点（发 done 信前 / 验收证据被接受前）由人或 agent
+#                                      在那两个时刻对**精确路径**运行——sendbox 常被排除出产品 git，
+#                                      没有任何 CI 能替 adopter 校验它。
 # 同样靠 __file__.parents[2] 定位 repo root，须放 .trellis/scripts/（两级深）；
 # 该目录整面已在 overlay/scripts/hgit 的 SNAPSHOT_PATHS 与侧史 allowlist 里，无需另加条目。
-for validator in validate_adr_numbers.py validate_harness_persistence.py; do
+for validator in validate_adr_numbers.py validate_harness_persistence.py validate_claim_provenance.py; do
   cp "$SRC/scripts/$validator" "$ROOT/.trellis/scripts/"
   chmod +x "$ROOT/.trellis/scripts/$validator"
 done
@@ -67,6 +73,10 @@ mkdir -p "$ROOT/.work_context/sendbox"
   cp "$SRC/work_context-templates/sendbox/_handoff-config.yaml" "$ROOT/.work_context/sendbox/"
 [ -e "$ROOT/.work_context/sendbox/_TEMPLATE-handoff.md" ] || \
   cp "$SRC/work_context-templates/sendbox/_TEMPLATE-handoff.md" "$ROOT/.work_context/sendbox/"
+# done 信模板：与 validate_claim_provenance.py 是**同一套契约**（模板给标准四列表，
+# validator 在发信前判它）；缺模板则门只剩纪律，故两者必须一起到位。
+[ -e "$ROOT/.work_context/sendbox/_TEMPLATE-done.md" ] || \
+  cp "$SRC/work_context-templates/sendbox/_TEMPLATE-done.md" "$ROOT/.work_context/sendbox/"
 HANDOFF_CONFIG="$ROOT/.work_context/sendbox/_handoff-config.yaml"
 if ! grep -Eq '^brand_routing:[[:space:]]*$' "$HANDOFF_CONFIG" \
    || ! grep -Eq '^[[:space:]]+same_brand_policy:[[:space:]]+strict[[:space:]]*$' "$HANDOFF_CONFIG"; then

@@ -6,6 +6,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
 ## [Unreleased]
 
 ### Added
+- **Claim-provenance gate, as one contract** (`overlay/scripts/validate_claim_provenance.py` + tests,
+  `overlay/work_context-templates/sendbox/_TEMPLATE-done.md`,
+  `overlay/spec/guides/_TEMPLATE-acceptance-evidence.md`, `_TEMPLATE-handoff.md` delta, adopt-wired) —
+  every conclusion a downstream reader acts on enters a canonical **schema v1** table
+  (`结论 | 类别（实测/推断）| 出处 | 未验证缺口`); prose outside the table is not acceptance evidence.
+  Column names are matched **exactly** (a parenthesised annotation is stripped); there are deliberately
+  **no English aliases and no fuzzy header guessing** — an unrecognised header is reported as *missing*,
+  and adding an alias is a versioned schema change. `推断` rows must name the still-unverified step, and
+  from **four rows up** a gap column that is one copied non-`无` constant fails: satisfying a required
+  column with a constant makes readers skip the column and drowns the rows that really have that gap.
+  **Execution model, stated honestly:** the gate has exactly two consumption points — before a new done
+  letter is sent, and before new/substantially rewritten acceptance evidence is accepted. It is **not** a
+  generic task hook, and **no CI job can enforce it on an arbitrary adopter's sendbox** (that sendbox is
+  typically excluded from the product git); CI can only check the validator's own behaviour.
+- **PR-B's validators wired into real gates** (`verification-and-gates.md`, `repomem-doc-boundary.md`,
+  `knowledge-closeout.md`, `roles-and-tiering.md`, `decisions/TEMPLATE.md`) — the two validators shipped
+  earlier had no answer-moment, which by this repo's own "a gate with no enforcer is decoration" rule made
+  them dead code. They now have gate-matrix rows (trigger / policy / where the trace lands), the ADR gate
+  is called out at draft time *and* on both sides of the accept-time rename (`--visibility` has no
+  default: a missing or ambiguous mode fails closed), the persistence gate lands in the landing manifest's
+  new **`History proof`** mandatory item (`path@commit`, or an explicit
+  `pending human commit authorization`), and a **`临时/共享资源生命周期`** mandatory item makes
+  "the creator will remember to clean it up" visible. Remote strength stays split into the two honest
+  flags (`--require-remote-configured` / `--require-remote-reachable`); ADR drafts are now
+  `proposed-<slug>.md` and take no number until a single accept party assigns one.
+- **Delivery preflight contract** (`agenttui-registry.md` §3) — one contract with two halves, both
+  spec-only and **each marked "adapter not implemented"**: *path derivation* ("where should I write?" —
+  a repo root inferred from the script's own location must be verified to actually be a project repo;
+  never `mkdir` a fake registry) and *route derivation* ("can I even reach it?"). New **rule 6
+  (send-side capability check)** validates only the capability the chosen route actually uses, reports
+  **`no-operational-route` with a non-zero exit** when no operational route exists — kept semantically
+  distinct from rule 3's `queued-unverified` ("didn't send" vs "sent but unverified") — and **forbids the
+  silent fall-back to `claude -p --resume`**; that is symmetry, not a new principle, since the codex
+  branch already refuses outright in the same situation. Rule 5 grows two field findings: "judge by
+  stdout, never by exit code" applies to the **injection and submit commands themselves** (rc=0 with only
+  `Session '<name>' not found` on stdout), with the worst case being **session present but pane absent —
+  rc=0 and completely empty stdout**, so the existence preflight is the *only* pre-injection detector and
+  the delivery nonce is the only post-hoc one; and `pane_ref` **rots on multiplexer session rename**
+  (a launch-time snapshot), so every existing `pane_ref` must be rebuilt wholesale rather than having its
+  `multiplexer` field edited.
 - **Harness mechanical-gate validators** (`overlay/scripts/validate_adr_numbers.py`,
   `overlay/scripts/validate_harness_persistence.py` + tests, adopt-wired into `.trellis/scripts/`) —
   two independent, stdlib-only, read-only checks. The ADR one rejects duplicate **four-digit
