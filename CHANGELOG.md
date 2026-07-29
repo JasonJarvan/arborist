@@ -6,6 +6,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
 ## [Unreleased]
 
 ### Added
+- **Harness mechanical-gate validators** (`overlay/scripts/validate_adr_numbers.py`,
+  `overlay/scripts/validate_harness_persistence.py` + tests, adopt-wired into `.trellis/scripts/`) —
+  two independent, stdlib-only, read-only checks. The ADR one rejects duplicate **four-digit
+  prefixes** (grouping the number alone, so `0007-a.md` and `0007-b.md` collide) while keeping
+  unnumbered `proposed-<slug>.md` drafts outside the numeric namespace, and visibility-checks drafts
+  *and* numbered ADRs so an accept-time rename is covered before and after numbering; which git
+  records specs is declared explicitly (`--visibility machine-local|product-git`) and a missing mode,
+  an ambiguous flag pair, or an absent side-history git dir **fails closed** instead of silently
+  skipping the check. The persistence one proves named durable paths exist, are unignored, are clean,
+  and carry a commit (`path@commit`), with remote strength split into two honestly-scoped flags:
+  `--require-remote-configured` (configuration only, says so in its own output) and
+  `--require-remote-reachable` (every evidence commit contained in a remote-tracking ref, bounded by
+  the last fetch). There is deliberately no `--require-remote`.
 - **Brand-capacity observer + safe AgentTUI launch contract** (`overlay/spec/guides/agenttui-launch-and-brand-capacity.md`,
   `overlay/spec/guides/decisions/0008-brand-capacity-and-safe-launch.md`) — a single-writer, stdlib-only,
   no-network, no-credentials observer (`overlay/scripts/arborist_brand_capacity.py` + tests) that reads
