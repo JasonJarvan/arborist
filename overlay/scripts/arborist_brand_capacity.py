@@ -27,12 +27,14 @@ from typing import Any, Iterator, Sequence
 
 
 # Two levels deep: adopted at <repo>/.trellis/scripts/, so parents[2] is the
-# canonical repository root (same convention as agenttui.py).
-DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_PATH = DEFAULT_REPO_ROOT / ".work_context/sendbox/_handoff-config.yaml"
-DEFAULT_STATE_PATH = DEFAULT_REPO_ROOT / ".arborist/runtime/brand-capacity.json"
-DEFAULT_REPORTS_DIR = DEFAULT_REPO_ROOT / ".arborist/runtime/brand-capacity-reports"
-DEFAULT_LOCK_PATH = DEFAULT_REPO_ROOT / ".arborist/runtime/brand-capacity.lock"
+# *candidate* repository root (same convention as agenttui.py). The inference is
+# only a candidate: nothing derived from it may be read or created before
+# resolve_repo_root() has confirmed it really is a project repository.
+REPO_MARKERS = (".trellis", ".git")
+CONFIG_RELATIVE_PATH = ".work_context/sendbox/_handoff-config.yaml"
+STATE_RELATIVE_PATH = ".arborist/runtime/brand-capacity.json"
+REPORTS_RELATIVE_PATH = ".arborist/runtime/brand-capacity-reports"
+LOCK_RELATIVE_PATH = ".arborist/runtime/brand-capacity.lock"
 DEFAULT_CODEX_SESSIONS = Path.home() / ".codex/sessions"
 DEFAULT_MAX_AGE_SECONDS = 15 * 60
 DEFAULT_SERVICE_INTERVAL_SECONDS = 60.0
@@ -64,6 +66,43 @@ ROLE_AFFINITY = {
 
 class CapacityError(RuntimeError):
     """The capacity input or local Arborist state is unsafe to consume."""
+
+
+def looks_like_project_repo(path: Path) -> bool:
+    return any((path / marker).exists() for marker in REPO_MARKERS)
+
+
+def infer_repo_root(script_path: Path) -> Path:
+    """Unvalidated inference: this script is adopted at <repo>/.trellis/scripts/."""
+    return script_path.resolve().parents[2]
+
+
+def resolve_repo_root(candidate: Path | None) -> Path:
+    """Fail closed unless the derived path really is a project repository.
+
+    This gate creates nothing. State, reports and the lock all live under the
+    derived root, and every one of those writers would happily `mkdir -p` its
+    parents — which is precisely how a mis-derived root becomes invisible: the
+    wrong location ends up looking like it had always been there.
+    """
+    explicit = candidate is not None
+    resolved = (candidate if explicit else infer_repo_root(Path(__file__))).expanduser()
+    resolved = resolved.resolve() if resolved.exists() else resolved.absolute()
+    source = "--repo" if explicit else "path inferred from this script's location"
+    if not resolved.is_dir():
+        raise CapacityError(
+            f"derived repository root is not a directory ({source}): {resolved}; "
+            "run this from inside the project repository or pass --repo explicitly"
+        )
+    if not looks_like_project_repo(resolved):
+        raise CapacityError(
+            f"derived repository root is not a project repository ({source}): "
+            f"{resolved} contains none of "
+            f"{', '.join(marker + '/' for marker in REPO_MARKERS)}; refusing to "
+            "read or create capacity state there — run this from inside the "
+            "project repository or pass --repo explicitly"
+        )
+    return resolved
 
 
 def require_object(value: Any, label: str) -> dict[str, Any]:
@@ -708,10 +747,35 @@ def build_parser() -> argparse.ArgumentParser:
             "only when creating a new Impler."
         )
     )
-    parser.add_argument("--repo", type=Path, default=DEFAULT_REPO_ROOT)
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
-    parser.add_argument("--state", type=Path, default=DEFAULT_STATE_PATH)
-    parser.add_argument("--reports-dir", type=Path, default=DEFAULT_REPORTS_DIR)
+    parser.add_argument(
+        "--repo",
+        type=Path,
+        default=None,
+        help=(
+            "project repository root (default: inferred from this script's "
+            "location, then validated — the inferred path must itself contain "
+            f"{' or '.join(marker + '/' for marker in REPO_MARKERS)}, otherwise "
+            "the run is refused instead of creating capacity state somewhere else)"
+        ),
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help=f"default: <repo>/{CONFIG_RELATIVE_PATH}",
+    )
+    parser.add_argument(
+        "--state",
+        type=Path,
+        default=None,
+        help=f"default: <repo>/{STATE_RELATIVE_PATH}",
+    )
+    parser.add_argument(
+        "--reports-dir",
+        type=Path,
+        default=None,
+        help=f"default: <repo>/{REPORTS_RELATIVE_PATH}",
+    )
     parser.add_argument("--codex-sessions", type=Path, default=DEFAULT_CODEX_SESSIONS)
     parser.add_argument(
         "--claude-command",
@@ -723,7 +787,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_CLAUDE_TIMEOUT_SECONDS,
     )
-    parser.add_argument("--lock", type=Path, default=DEFAULT_LOCK_PATH)
+    parser.add_argument(
+        "--lock",
+        type=Path,
+        default=None,
+        help=f"default: <repo>/{LOCK_RELATIVE_PATH}",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("refresh", help="refresh the local capacity snapshot")
@@ -770,24 +839,47 @@ def print_json(value: dict[str, Any]) -> None:
 
 def run_refresh(args: argparse.Namespace) -> dict[str, Any]:
     return refresh_snapshot(
-        repo_root=args.repo.resolve(),
-        config_path=args.config.resolve(),
+        repo_root=args.repo,
+        config_path=args.config,
         codex_sessions=args.codex_sessions.resolve(),
-        state_path=args.state.resolve(),
-        reports_dir=args.reports_dir.resolve(),
+        state_path=args.state,
+        reports_dir=args.reports_dir,
         claude_command=args.claude_command,
         claude_timeout_seconds=args.claude_timeout_seconds,
     )
 
 
+def resolve_paths(args: argparse.Namespace) -> None:
+    """Validate the repository root first, then derive every path from it.
+
+    Order matters: nothing may be resolved (let alone created) under an
+    unvalidated root.
+    """
+    args.repo = resolve_repo_root(args.repo)
+    defaults = {
+        "config": CONFIG_RELATIVE_PATH,
+        "state": STATE_RELATIVE_PATH,
+        "reports_dir": REPORTS_RELATIVE_PATH,
+        "lock": LOCK_RELATIVE_PATH,
+    }
+    for attribute, relative in defaults.items():
+        supplied = getattr(args, attribute)
+        setattr(
+            args,
+            attribute,
+            (args.repo / relative) if supplied is None else supplied.resolve(),
+        )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        resolve_paths(args)
         if args.command == "status":
-            print_json(read_json(args.state.resolve()))
+            print_json(read_json(args.state))
             return 0
         if args.command == "recommend":
-            snapshot = read_json(args.state.resolve())
+            snapshot = read_json(args.state)
             print_json(
                 recommend_brand(
                     snapshot,
@@ -797,16 +889,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
         if args.command == "refresh":
-            with exclusive_lock(args.lock.resolve()):
+            with exclusive_lock(args.lock):
                 print_json(run_refresh(args))
             return 0
         if args.command == "report":
             payload = read_json(args.input.resolve())
-            with exclusive_lock(args.lock.resolve()):
+            with exclusive_lock(args.lock):
                 print_json(
                     write_self_report(
-                        repo_root=args.repo.resolve(),
-                        reports_dir=args.reports_dir.resolve(),
+                        repo_root=args.repo,
+                        reports_dir=args.reports_dir,
                         agent_name=args.agent,
                         payload=payload,
                     )
@@ -815,7 +907,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "serve":
             if not math.isfinite(args.interval) or args.interval <= 0:
                 raise CapacityError("--interval must be finite and positive")
-            with exclusive_lock(args.lock.resolve()):
+            with exclusive_lock(args.lock):
                 while True:
                     print_json(run_refresh(args))
                     if args.once:
