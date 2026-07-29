@@ -260,6 +260,7 @@ class SideHistoryVisibilityTests(unittest.TestCase):
             ".trellis/scripts/arborist_brand_capacity.py",
             ".trellis/scripts/validate_adr_numbers.py",
             ".trellis/scripts/validate_harness_persistence.py",
+            ".trellis/scripts/validate_claim_provenance.py",
             "AGENTS.md",
             "hgit",
             "scripts/trellis_multica_sync.py",

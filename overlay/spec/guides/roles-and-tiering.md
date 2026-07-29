@@ -29,8 +29,8 @@ Impler 派出的 implement、TDD、refactor、Explore、check、challenge、rese
 ## 收尾职责分层（close-out split · 防 rootorc 阻塞）
 收尾不再整块压在 L4；按 Lane 切：
 - **fast lane**：L2 Impler **全权收尾**（自 trellis-check + 行为自验 + WIMTB 自任务 + flip status）；无 L4 门。commit 仍 ask-first 对 human。
-- **full lane**：L2 Impler 做**收尾起草**——check/自验 → WIMTB 自任务草稿 → ADR 候选**写成 `Status: proposed` 的真文件**（不再只 surface 文本）→ **派独立 challenge subagent** 唱反调（见 `verification-and-gates.md` «Challenge-before-ack»）→ 备好 commit/status 但不执行 → done 信打包**「待接受包」**（proposed ADR 列表 + WIMTB 草稿 + challenge 裁定 + 拟提交范围）回 L4。
-- **L4 轻量 accept**：只做 L2 做不了的——**跨任务/集成一致性扫描**（唯 L4 见姊妹任务）+ **翻 ADR `proposed→accepted`**（晋升最终权）+ **commit/push/MR**（对 human）+ flip issue status done。
+- **full lane**：L2 Impler 做**收尾起草**——check/自验 → WIMTB 自任务草稿 → ADR 候选**写成 `Status: proposed`、文件名为 `proposed-<slug>.md` 的真文件**（起草**不占数字编号**；见 [`repomem-doc-boundary.md`](./repomem-doc-boundary.md#adr-文件名与编号分配共享命名空间硬规则)）→ **派独立 challenge subagent** 唱反调（见 `verification-and-gates.md` «Challenge-before-ack»）→ 备好 commit/status 但不执行 → done 信**以标准 claim provenance 表**打包**「待接受包」**（proposed ADR 列表 + WIMTB 草稿 + challenge 裁定 + 拟提交范围），**并在发出前通过 `validate_claim_provenance.py`** 后回 L4。
+- **L4 轻量 accept**：只做 L2 做不了的——**跨任务/集成一致性扫描**（唯 L4 见姊妹任务）+ **ADR validator 前检 → 分配 `NNNN` 并翻 `proposed→accepted` → validator 后检**（晋升最终权；前后两检见 `repomem-doc-boundary.md`）+ **commit/push/MR**（对 human）+ flip issue status done。
 - **永不下放（rootorc/human 安全边界）**：产品仓 commit/push · 跨任务裁决 · ADR 最终接受。
 - **Impler 收敛：可「问」orch，不可「转派」给 orch**（close-out split 的本意，见 [ADR-0004](./decisions/0004-closeout-split-l2-draft-l4-accept.md)）：起草收敛后仍有残务，出口是**收敛自己做完**，不是把活弹回上级。
   - **可以问**（成本低、保住第二双眼睛）——把这些写成 done 信里的**「Impler 提的问题」清单**：冲突仲裁、跨任务 / 对外契约的验收、scope 缺陷、blocker。问题是「请你判断 X」，不是「请你替我做 X」。
@@ -63,10 +63,10 @@ L2/L3 默认在独立 `git worktree` 里干活，把产品代码与并发 sessio
 `no_task → 建 task(Lane=fast) → 1.0b research-first(轻) → [brainstorm 常跳，记 skip-log] → prd-only → start → 2.1 实现(fast-lane 琐碎可免 red-test-first，记 skip-log；否则 TDD) → 2.2 trellis-check → 3.3 判 spec/ADR(多为无) → /commit(ask-first) → /pr 进当期 release(security-scan 若动依赖) → finish-work`。无 L3/L4 编排、无 sendbox。
 
 ### 场景 B：中等特性（full lane，L4→L2 单派）
-`L4: research-first + RepoMem.read + brainstorm(与 human) → 建 task(Lane=full, prd+design+implement) → [4.1 grill / 4.2 red-team 可选] → sendbox handoff 给 Impler(read_first 绝对路径 + process 声明) → L2 Impler: start → 2.1 TDD(派 L1 subagent) → 2.2 check + security-scan(动依赖)+人工 smoke(风险触发) → 3.3 **收尾起草**(check/自验 + WIMTB 自任务草稿 + ADR 候选写成 `proposed` 真文件 + **派独立 challenge subagent** 唱反调 + 备好 commit/status 不执行) → done 信打包**「待接受包」**回 L4 → L4: /code-review → **轻量 accept**(跨任务/集成一致性 + 翻 ADR `proposed→accepted`) → /commit + /pr(进 release) → archive(WIMTB 进 Multica) → RepoMem.merge`。
+`L4: research-first + RepoMem.read + brainstorm(与 human) → 建 task(Lane=full, prd+design+implement) → [4.1 grill / 4.2 red-team 可选] → sendbox handoff 给 Impler(read_first 绝对路径 + process 声明) → L2 Impler: start → 2.1 TDD(派 L1 subagent) → 2.2 check + security-scan(动依赖)+人工 smoke(风险触发) → 3.3 **收尾起草**(check/自验 + WIMTB 自任务草稿 + ADR 候选写成 `proposed-<slug>.md` 真文件、不占数字编号 + **派独立 challenge subagent** 唱反调 + 备好 commit/status 不执行) → done 信 claim provenance validator PASS 后打包**「待接受包」**回 L4 → L4: /code-review → **轻量 accept**(跨任务/集成一致性 + validator 前检 → 分配 `NNNN` 并翻 `accepted` → validator 后检) → /commit + /pr(进 release) → archive(WIMTB 进 Multica) → RepoMem.merge`。
 
 ### 场景 C：大特性/超长程（full，L4→L3→多 L2 并发）
-`L4: 分解成 parent(L3 cohort) + 多个 child(L2) → 派 L3 给 SubOrche → L3 SubOrche: 维护 L3 dashboard、排序、逐个 sendbox 派 L2 给多个 Impler(并发 session) → 各 L2 Impler 跑场景 B 的 L2 段(含**收尾起草** + 独立 challenge subagent)、done 信打包**「待接受包」**回 L3 → L3: cohort 集成验收 → 回报 L4 → L4: 整体**轻量 accept**(跨 cohort 一致性 + 翻 ADR `proposed→accepted`) + 上线 → 各 L2 archive→WIMTB, L3 收敛→WIMTB 进 L3 父 issue`。human 同时盯这些 session → 用 Dashboard 看待办。
+`L4: 分解成 parent(L3 cohort) + 多个 child(L2) → 派 L3 给 SubOrche → L3 SubOrche: 维护 L3 dashboard、排序、逐个 sendbox 派 L2 给多个 Impler(并发 session) → 各 L2 Impler 跑场景 B 的 L2 段(含**收尾起草** + 独立 challenge subagent)、done 信 claim provenance validator PASS 后打包**「待接受包」**回 L3 → L3: cohort 集成验收 → 回报 L4 → L4: 整体**轻量 accept**(跨 cohort 一致性 + ADR validator 前检 → 分配编号并翻 `accepted` → validator 后检) + 上线 → 各 L2 archive→WIMTB, L3 收敛→WIMTB 进 L3 父 issue`。human 同时盯这些 session → 用 Dashboard 看待办。
 
 > step 细节见 workflow.md Phase 1/2/3 + `pipeline-mapping.md`（HS 15-step 落点）；门控 policy 见 `execution-policy.md`；交办见 `sendbox.md`。
 

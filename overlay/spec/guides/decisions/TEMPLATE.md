@@ -1,5 +1,19 @@
-<!-- ADR 模板。复制为 NNNN-<slug>.md（NNNN 四位序号）。只收过三门的架构决策。 -->
-# ADR-NNNN: <决策标题>
+<!--
+ADR 起草模板。**复制为 `proposed-<slug>.md`；起草者不占数字编号。**
+只在 HITL accept 时，由本次单一 accept 方分配 NNNN 并改名为 `NNNN-<slug>.md`。
+起草完成、以及 accept 的改名/状态写入前后，各运行一次：
+  python3 .trellis/scripts/validate_adr_numbers.py --visibility <machine-local|product-git>
+该门同时校验四位数字前缀唯一性、与「记规范那个 git」对 proposed 草稿及已编号 ADR
+的可见性（`--visibility` 无默认值，缺失/歧义 exit 2 fail closed）。规则见
+guides/repomem-doc-boundary.md「ADR 文件名与编号分配」。
+
+machine-local 下，只有在 human 明确授权 hgit commit、提交完成、且运行
+  python3 .trellis/scripts/validate_harness_persistence.py <本 ADR 路径>
+成功之后，才可声称「已持久」；否则 landing manifest 写 pending。
+只收过三门的架构决策。
+-->
+# ADR (proposed): <决策标题>
+<!-- accept 时随改名一并改成 `# ADR-NNNN: <决策标题>` -->
 
 - **Status**: proposed | accepted | superseded-by ADR-XXXX
 - **Origin**: <task 目录名 / issue-key>  <!-- 必填：晋升溯源到变更史（Pairing Rule 3）-->

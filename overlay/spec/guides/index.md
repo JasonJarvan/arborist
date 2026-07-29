@@ -10,18 +10,19 @@
 |-------|------|--------|
 | [角色层与任务分层 L1–L4](./roles-and-tiering.md) | L4 RootOrche / L3 SubOrche / L2 Impler / L1 subagent + 各级 steps + 生命周期场景 + ATUI 归属边界（通报⊥交办）+ worktree 步与纪律 | 多 session 协作、分解/派活、worktree 隔离 |
 | [Execution Policy & Skip](./execution-policy.md) | 四级门控（auto/auto-judge/ask-first/HITL）+ Skip Bias + 跳过审计 + hooks add-only | 判断某步跑/跳、如何记录 |
-| [RepoMem 层：文档边界与晋升](./repomem-doc-boundary.md) | 三层认知论 + Document Boundary 权威表 + Pairing Rules + persist 纪律 + read 装载 + spec/ADR 可见性（product-git vs machine-local）| 沉淀知识、晋升 ADR、避免复述 |
+| [RepoMem 层：文档边界与晋升](./repomem-doc-boundary.md) | 三层认知论 + Document Boundary 权威表 + Pairing Rules + persist 纪律 + read 装载 + spec/ADR 可见性（product-git vs machine-local）+ machine-local `path@commit` 持久性证明 + accepted ADR 事实性更正边界 + ADR 编号分配硬规则 | 沉淀知识、晋升 ADR、避免把「已物化」误报成「已持久」 |
 | [泛化边界（技术基石）](./generalization-boundary.md) | 泛化 gap 定义 + host-config/定制层/占位 三处分流 + 结构性排除 + 注入子集边界 + `spec_visibility` + 预防>检测>判断 | 撰写/同步 guide、公开上推去隐私、想让同步机械化 |
-| [Verification & Gates](./verification-and-gates.md) | 门有执行者吗（通则）+ 多 lens 验证 + security-scan 接 MR 硬门 + 门控矩阵（含代码评审行）+ landing manifest + Challenge-before-ack + 已知上游 Trellis 缺口 | 验证、发 MR、晋升知识、给荣誉制门配机械产物 |
-| [Sendbox 定向交办](./sendbox.md) | 跨 session 角色交办（read_first 绝对路径 + process-completeness + 生命周期/WIMTB）+ 持久化形态 A/B · fyi 信型 | durable handoff / 回报 |
+| [Verification & Gates](./verification-and-gates.md) | 门有执行者吗（通则，含共享命名空间/荣誉制记录/临时资源三形态 + 持久化两档 remote 强度）+ 多 lens 验证 + security-scan 接 MR 硬门 + 门控矩阵（代码评审 / claim provenance / ADR 编号 / harness persistence / 临时资源行）+ landing manifest（含 History proof 必答项）+ Challenge-before-ack + 已知上游 Trellis 缺口 | 验证、发 MR、晋升知识、给荣誉制门配机械产物 |
+| [Sendbox 定向交办](./sendbox.md) | 跨 session 角色交办（read_first 绝对路径 + process-completeness + 生命周期/WIMTB）+ 持久化形态 A/B · fyi 信型 + done 信/验收证据的 claim provenance 门（两个消费点 · 非通用 hook）| durable handoff / 回报 / 写 done 信 |
 | [Dashboard 待办投影](./dashboard.md) | 跨 session「此刻轮到人做什么」单一视图 | 多 session/待办堆积 |
-| [AgentTUI 注册表](./agenttui-registry.md) | 并发 session 同伴发现：`.arborist/` 级联 + spec/runtime schema + 声明/派生状态模型（含 stopped 写入 guard + 活转录矛盾检测/reconcile）+ 自登记（含写入路径 fail-closed 门）+ 投递契约（送达证据等级、pane 存在性探针、随发 adapter 缺口清单） | 开新 session 自登记、找同伴、投递给同伴、gardener 维护注册表 |
+| [AgentTUI 注册表](./agenttui-registry.md) | 并发 session 同伴发现：`.arborist/` 级联 + spec/runtime schema + 声明/派生状态模型（含 stopped 写入 guard + 活转录矛盾检测/reconcile）+ 自登记（含写入路径 fail-closed 门）+ 投递契约（送达证据等级、pane 存在性探针、发送侧能力检查与 `no-operational-route`、投递前置校验两半、随发 adapter 缺口清单） | 开新 session 自登记、找同伴、投递给同伴、gardener 维护注册表 |
 | [安全启动 AgentTUI + brand-capacity observer](./agenttui-launch-and-brand-capacity.md) | §1 安全启动独立 ATUI 契约（一 tab 一 ATUI + new-tab 清父身份 + resolve 稳定非插件 pane + 定向 bootstrap + 被启动方自登记 brand + HITL）；§2 单写者 observer 契约（CLI/schema/source+freshness）+ §2.4 Claude `/usage` collector；§3 建 Impler 前 selection 语义 | 启动独立新 AgentTUI、建新 Impler 前按容量选 brand |
 | [工具注册表 / 插件层](./tool-registry.md) | 可选能力发现：`.arborist/tools/` 级联 + `tool.json` schema + required/optional 置备与逐工具 fallback + 工具已知局限（`known_limits`：静默漏/静默空 → 交叉核验 + prefer 必配 fallback） | 需要某可选能力（历史检索/台账/…）、登记新工具、adopt 置备、写「prefer tool X」的 spec 行 |
 | [知识收尾（洁癖式）](./knowledge-closeout.md) | 交付后全仓知识一致性门：事实面矩阵 + 两阶段汇报 + 触发分级（含 `/neat` 手动触发词表，覆盖 fast-lane 跳过）+ landing manifest（无条件产出）；收尾方自跑 | full lane/milestone 收口、`/neat`/neat skill/洁癖 skill 显式点名、扫改动面外的过期文档/规则/记忆 |
 | [HS 15-step 落点映射](./pipeline-mapping.md) | HarnessStack 15 步 → Trellis 3 阶段/guides 对照 | 想知道某方法论步进哪了 |
 | [Engineering 方法论簇](./methodology/) | T1–T9（LLM 测试 / 验证纪律 / 契约防漂移 / MR / 依赖治理 / 数据契约 / 错误处理 / 本地文档 / handoff 归因）+ Tier3 | 对应场景取用 |
-| [ADR 模板](./decisions/TEMPLATE.md) | 架构决策记录（三门自检 + `Origin` 溯源） | 产生 durable 架构决策时 |
+| [ADR 模板](./decisions/TEMPLATE.md) | 架构决策记录（三门自检 + `Origin` 溯源 + 起草为 `proposed-<slug>.md` 不占号 + 前后两次 validator） | 产生 durable 架构决策时 |
+| [Acceptance evidence 模板](./_TEMPLATE-acceptance-evidence.md) | 验收结论按 实测/推断 分类，强制出处与未验证缺口（配 `validate_claim_provenance.py`） | 新建或实质重写验收证据文档时 |
 
 ## ADR Index（RepoMem.read 必读）
 

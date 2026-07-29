@@ -44,7 +44,7 @@
 | `state` | **声明态**：`active` / `stopped`（`idle` 为保留枚举值，MVP 不自写，见 §3）。`stopped` 有**写入门槛**（仅会话真正结束才写，见 §3/§4）且遇活转录矛盾会被派生规则**降级为 contradiction**——声明态非确知，读者据 §3 现算，不无条件采信 `stopped` |
 | `last_seen` | 心跳时间戳（ISO8601，可信触点顺带刷新）。**写 `stopped` 时也须记 `last_seen`**——它是活转录矛盾检测的基准：若 `session_file` mtime 晚于该 `stopped` 写入记录的 `last_seen`（容小段文件系统时钟偏移），即声明与派生活性证据矛盾（见 §3） |
 | `generation` | 重启代数（同一 `name` 重启/换 session 时 +1） |
-| `pane_ref` | 可选：**投递 adapter 用的** 终端复用器 pane/tab 引用。core 不强制（未启用活 pane 投递时置 `null`）；启用活 pane 投递 adapter 时按 [ADR-0007](./decisions/0007-agenttui-delivery-contract-pluggable-adapter.md) 契约填，供 adapter 寻址目标 pane。注意：送达证据（transcript 字节边界 / per-send nonce / marker）是 **per-send 运行时态，不入本静态表**，故此表**不**新增存 nonce/证据的字段 |
+| `pane_ref` | 可选：**投递 adapter 用的** 终端复用器 pane/tab 引用。core 不强制（未启用活 pane 投递时置 `null`）；启用活 pane 投递 adapter 时按 [ADR-0007](./decisions/0007-agenttui-delivery-contract-pluggable-adapter.md) 契约填，供 adapter 寻址目标 pane。**它是启动时快照、会腐烂**：复用器 session 改名或换复用器后，整条 `pane_ref` 必须**重建**（不能只改 `multiplexer` 字段），否则注入会静默投空——见 §3 投递契约规则 5。注意：送达证据（transcript 字节边界 / per-send nonce / marker）是 **per-send 运行时态，不入本静态表**，故此表**不**新增存 nonce/证据的字段 |
 
 ### 2.3 全局 `index.json`（摘要级，gardener 维护）
 
@@ -132,6 +132,23 @@
    - 仍然：pane 命令成功 / pane 存在 / 转录 size 增长 / mtime 变化**都不是**送达证据（忙碌目标会自行增长转录）；**peer 回复是唯一的语义 ACK**。
 4. **fail-closed**：未验证即 `queued-unverified`，绝不当 `delivered`。「未验证」= **两路都没搜到 nonce**（含降级后的全文搜索），不是「指纹核不上」。
 5. **pane 存在性 preflight 必须选「对不存在的 pane 会明确报错」的探针，且按 stdout 文本判定**（transport 中立表述；zellij 侧的具体裁定见下「参考 adapter」段）：**禁用**「对不存在的 pane 静默返回空」的读屏类命令作存在性判据（会得**假阳性**：把不存在的 pane 认作存在）；且**不得靠退出码**——复用器可能对「pane 不存在」也返回 rc=0。存在性 preflight 只解决**寻址**，本身**不是**送达证据（规则 3 不变）。
+   - **「按 stdout 判定、不靠 rc」不只适用于探针，也适用于注入与提交命令本身**：复用器对「目标 session 名不存在」也可能 **rc=0 而只在 stdout 说明**（实测文本见下「参考 adapter」段的 zellij 裁定）。⇒ 调用方若按 `$?` 判成功，会把「整条命令打进虚空」读成「已发出」。
+   - **最坏情形：连 stdout 判定都救不了** —— **session 存在、但 pane 不存在**时，注入命令可能 **rc=0 且 stdout 完全为空**（zellij 实测，见下）。这一格没有任何事后文本可依据。⇒ **本规则的存在性 preflight 不是优化，而是唯一能在注入前发现该情形的手段**（会报错的探针至少会打印 not found）；一旦注入已经发出，唯一判据只剩规则 3 的**送达证据（nonce）**。
+   - **本规则只管 pane 存在性，不覆盖「`pane_ref.session` 腐烂」**：复用器 session **改名**后，据启动时环境快照推断出的 `pane_ref.session` 即失效（复用器把 session 名注入子进程环境时是**启动时快照**，改名不回写已运行的进程），且因上一条会**静默成功**——信封喷进虚空。故**换复用器或改名后，所有既有 `pane_ref` 必须整条重建，不能只改 `multiplexer` 字段**。（证据等级：**下游实测，上游未独立复现**。）
+6. **发送侧能力检查（发之前先问「我投得进去吗」）**：发送方必须校验**本次路由实际要用的**那条投递能力**现在还在**——**走 pane 就校验 pane 侧能力（复用器 CLI + 目标 pane 存在，按规则 5），走 resume 才校验 resume 侧 CLI**；不得为了「看起来更严格」去校验本次不用的能力（那只会在无关缺失时误拒）。
+   - 校验不过、或**推不出任何可用的 operational 路由** ⇒ 报 **`no-operational-route`** 且**非零退出**。
+   - **`no-operational-route` 与规则 3 的 `queued-unverified` 语义必须分开**：前者是「**没发出去**」（发送侧前提不成立，重试是安全且必要的），后者是「**发了但没验到**」（可能已送达，盲目重发会重复入队，见规则 2）。把二者混成一个状态，调用方就无法判断该不该重发。
+   - **禁止静默回落到 `claude -p --resume`**：pane 路由不可用时悄悄改走 resume，会把「定向注入到活 TUI」换成「往会话文件追加、回复走调用方 stdout、对方界面上看不见」（§3 末 NOTE），且**代价与语义都变了却没人被告知**。要走 resume 必须是**显式选择**（调用方指定或配置声明），不是失败兜底。
+   - **对称性论证（这是补对称，不是新原则）**：adapter 对 codex 分支**早已**明确拒绝——活 Codex TUI 而无 `pane_ref` 时直接报错，不去猜一条更差的路；而 claude-code 分支在同样处境下却**静默**回落 `claude -p --resume`。同一处境、两个 brand 两种行为，本规则把 claude-code 拉回与 codex 一致的 fail-closed 形状。
+
+**投递前置校验（统一契约：动手前先验前提，验不过就拒绝，不猜、不静默降级）**：上面规则 5/6 各管一半前提；两半共用**同一形状**，故在此收成**一条**契约，避免各处再写各自的临时门。
+
+| 半边 | 问题 | 硬规则 | 拒绝时 |
+|---|---|---|---|
+| **路径推导** | 「我该往哪写？」 | 由脚本位置反推仓根（`__file__` 上溯 N 级那一族做法）**必须校验推导结果真是项目仓**——目标目录须含 `.trellis/` 或 `.git/`。推不出、或推出来的不是项目仓 ⇒ 拒绝；**绝不 `mkdir` 造一个假注册表**（`mkdir -p` 恰好会把错位置造得「像是本来就有」）。自登记时目标 `.arborist/` 不存在的处置**不在此复述**，见 §5 第 8 点（fail-closed 报 `half-registered`、不得静默上移父目录）。 | 非零退出 + 明确说出「推导出的路径不是项目仓」 |
+| **路由推导** | 「我投得进去吗？」 | 推不出可达路由即 fail-closed（规则 6）；pane 存在性用**会报错**的探针并**解析 stdout**（规则 5），禁用「对不存在 pane 静默返回空 + rc=0」的读屏类命令；**路由与传输必须分层**——preflight 与路由判据定义在「**本次路由所需能力**」这一抽象层上，**不得**把某个具体复用器的名字/命令硬编进路由判定（那样每换一次复用器都要改路由代码，而契约本该只换 adapter）。 | `no-operational-route` + 非零退出（**≠** `queued-unverified`）|
+
+- **⚠️ 两半均为 adapter 未实现**（截至 2026-07-30）：随发 `scripts/agenttui.py` 目前①按 `__file__` 上溯定位仓根、**不校验**结果是否为项目仓；②`build_route` 里**硬编**「复用器必须是 zellij，否则报错」，即把传输选择焊死在路由判定里，与本契约的分层要求及 [ADR-0007](./decisions/0007-agenttui-delivery-contract-pluggable-adapter.md) 的 transport 中立**直接冲突**；③无发送侧能力检查、无 `no-operational-route` 状态。规范先落、实现随后收敛，见下「随发 adapter 的契约缺口」。
 
 - **参考 adapter（随发 · opt-in · 二选一别混）**：
   - `scripts/agenttui.py`（adopt 铺到 `<repo>/.trellis/scripts/`）是本契约的 **operational 参考实现**——按注册表 `pane_ref` 用 `zellij … write-chars --pane-id <目标 pane>` 寻址注入；调用见工具表条目 `agenttui-direct`（`python3 .trellis/scripts/agenttui.py {status|send|heartbeat|stop}`，发前可 `--dry-run` 验路由）。**operational 投递一律走它**（而非下面那个演示脚本）。**⚠️ 它当前并未满足契约全部条款**——缺口逐条列在下方「随发 adapter 的契约缺口」，别读成「已满足全部契约」。
@@ -139,12 +156,20 @@
     - **后果 = 一条已知架构局限**：投递因此会**抢焦点**，与「人类正在同一 zellij session 里操作（切 tab / 移焦点）」**结构性冲突**——人类的一次切 tab 就能让并发投递投错或被打断。本 guide **只记录该局限**，不承诺任何具体替代方案；终端复用器的选择**正在评估**（core 仍 transport 中立，见 [ADR-0007](./decisions/0007-agenttui-delivery-contract-pluggable-adapter.md) Amendment）。
     - 规避（当前唯一诚实建议）：跨 tab 投递期间避免人机同时操作同一 session；或把被投递的 AgentTUI 放在人类不手动切换的 session/tab 里。
   - **zellij 侧存在性探针裁定（对应契约规则 5）**：`zellij action dump-screen -p … --pane-id <不存在的 pane>` → **静默返回空且 rc=0**（**上游 gardener 已独立复现**）⇒ **禁用**作存在性判据。`zellij action focus-pane-id <不存在的 pane>` → 明确打印 `Pane with id Terminal(<N>) not found` 且不改焦点 ⇒ 可靠探针；**但它 rc 也是 0**（上游复现时发现，下游报告未提）⇒ **必须解析 stdout 文本**，不能靠 `$?`。
+  - **zellij 侧「注入/提交命令自身的 rc 也不可信」的实测三格（对应契约规则 5 的两条扩展）**：
+    - **session 不存在** + `write-chars` → **rc=0**，stdout 有文本 `Session '<name>' not found` ⇒ **可**按 stdout 判失败（**上游 gardener 已独立复现**）。
+    - **session 不存在** + 提交键 `write <byte>` → **rc=0**，stdout 同上 ⇒ 可按 stdout 判（**上游已独立复现**）。
+    - **session 存在但 pane 不存在** → **rc=0 且 stdout 完全为空** ⇒ **事后无任何文本可判**（上游复验时的新发现）。这一格正是「存在性 preflight 是唯一事前手段、nonce 是唯一事后判据」的来源。
+    - 关联：`pane_ref.session` 会因 zellij session **改名**而腐烂——`ZELLIJ_SESSION_NAME` 是**启动时快照**、不回写已运行的进程，故据它推断的 `pane_ref.session` 改名后失效，并落进第一格**静默成功**（证据等级：**下游实测，上游未独立复现**）。规则 5 只管 pane 存在性、**不覆盖这一类**；改名或换复用器后 `pane_ref` 必须整条重建。
   - `scripts/agenttui_deliver_zellij.py` 是**契约的 seam 化演示，非 operational**：默认注入器**收 `pane_ref` 却不定向、只写当前焦点 pane**，跨 session / 跨 brand（目标 pane ≠ 焦点 pane）必投错——**未补 `--pane-id` 前不得当跨 pane operational 路**（下游把它误当正道，正是跨 brand 发信「表现不佳 / 不稳定」的根因）。
-- **⚠️ 随发 adapter 的契约缺口（截至 2026-07-29，必须可见——契约不得被读成「代码已做到」）**：随发 `scripts/agenttui.py` **尚未**实现下列契约条款，port 任务另行追踪；在它补齐前，调用方须自行承担对应风险：
+- **⚠️ 随发 adapter 的契约缺口（截至 2026-07-30，必须可见——契约不得被读成「代码已做到」）**：随发 `scripts/agenttui.py` **尚未**实现下列契约条款，port 任务另行追踪；在它补齐前，调用方须自行承担对应风险：
   - **规则 3 的 inode+size 双指纹与全文降级**：未实现——只记 size 作起始偏移，且当**现 size 小于该偏移**（= 文件被重写/截短）时**直接判未命中** ⇒ 目标做过 compact / 会话文件被重写时返回**假阴性** `queued-unverified`（重发风险，见规则 2）。
   - **规则 3 的证据等级标注**：未实现——命中只记单一 `envelope-nonce-found`，不区分 `…-after-boundary` / `…-fullfile`，调用方读不出证据强度。
   - **`--pane-id` 前置 `focus-pane-id` 聚焦**：未实现 ⇒ **跨 tab 投递会静默不生效**（字节没进目标 pane，也拿不到 nonce 证据）。
-  - **规则 5 的存在性 preflight（解析 stdout）**：未实现 ⇒ pane 已消失/换号时表现为「命令成功但无送达证据」。
+  - **规则 5 的存在性 preflight（解析 stdout）**：未实现 ⇒ pane 已消失/换号时表现为「命令成功但无送达证据」；**session 存在而 pane 不存在**这一格更是 rc=0 + stdout 全空，事后无任何文本可依据。
+  - **规则 5 的「注入/提交命令也按 stdout 判定」**：未实现 —— 仍以命令退出码为主判据 ⇒ session 名腐烂（改名）或写错时**静默成功**。
+  - **规则 6 的发送侧能力检查 + `no-operational-route`**：未实现 —— 目前 claude-code 分支在 pane 路不可用时**静默回落** `claude -p --resume`（codex 分支已按契约明确拒绝），且没有与 `queued-unverified` 区分开的「没发出去」状态。
+  - **「投递前置校验」两半**：未实现 —— ①仓根按 `__file__` 上溯得出，**不校验**其是否真是项目仓；②`build_route` 硬编「复用器 == zellij」，路由与传输焊死，换复用器无法只换 adapter。
   规范先于实现落定是**刻意**的（契约是判据、实现向它收敛）；但**凡未实现处必须像这样逐条标注**，不得笼统写成「参考 adapter 已满足上述契约」。
 - **契约里的 nonce ≠ §5.2 自识别 nonce**（用途不同，勿混淆）：本节的 per-send nonce 是**送达证据**——证明「这一条信封确实进了对方 transcript」；§5.2（自登记步骤 2）的无桥接 nonce grep 是**自识别探针**——本会话往自己终端吐一个随机串、再回自己 brand 目录 grep 定位**自身** `session_id`/`session_file`。前者验对端送达、后者定位本端句柄，各自独立。
 - **证据是 per-send 运行时态，不入注册表**：字节边界 / nonce / marker 均随单次发送产生与消亡，注册表是静态发现表，**不**为其新增字段（`pane_ref` 只存寻址句柄，见 §2.2）。
@@ -181,7 +206,7 @@
 5. 同一 `name` 重启换新 session：更新 runtime.json（新 session_id / session_file，`generation` +1），spec.json 不动（`lineage` 是稳态身份，重启不变）。
 6. （可选）把自己追加进全局 `~/.arborist/index.json` 摘要（含 `lineage`）；不追加则留给 gardener 汇总。
 7. **经继承接管（sendbox Mode B）**：若本会话是经 inheritance-mode handoff 接管某角色（承担者换人、角色不变），spec.json 写 `lineage = 前任 lineage + 1`、`lineage_origin = 前任 session_id + 交接信名`（面包屑，非权威，见 §2.1）；`generation` 仍按本会话自身重启计（新会话即 1，与 lineage 无关）。
-8. **写入路径 fail-closed 门（`.arborist/` 必须就在仓根下）**：leaf 只能落在 `<repo>/.arborist/agents/<name>/`，其中 `<repo>` = 本项目根，且与写入的 `spec.project.path` **同一路径**。**若目标 `<repo>/.arborist/` 目录不存在，必须 fail-closed 并报 `half-registered`，不得静默上移到父目录、也不得靠 `mkdir -p` 顺手造出一整条新路径**——`mkdir -p` 恰好会把错位置造得「像是本来就有」，从外面看不出错。
+8. **写入路径 fail-closed 门（`.arborist/` 必须就在仓根下）**——这是 §3「投递前置校验」**路径推导**那一半在自登记侧的落点（同一条契约、同一形状：动手前先验前提，验不过就拒绝）：leaf 只能落在 `<repo>/.arborist/agents/<name>/`，其中 `<repo>` = 本项目根，且与写入的 `spec.project.path` **同一路径**。**若目标 `<repo>/.arborist/` 目录不存在，必须 fail-closed 并报 `half-registered`，不得静默上移到父目录、也不得靠 `mkdir -p` 顺手造出一整条新路径**——`mkdir -p` 恰好会把错位置造得「像是本来就有」，从外面看不出错。
    - **真实故障形态（须知，因为它完全静默）**：某写入方的 leaf 内容**全部正确**（`project.path` / `project_id` 都指向真仓），却把整个 `.arborist/` 写在了**仓的父目录**下；多日无人察觉，多条 leaf 与配套的唤醒/触达基础设施全落在错处，而注册表**字段自洽、看起来是好的**——错的只有落盘位置，恰是没人核对的那一项。**该现场的成因另有其人、尚未定位**；本门只消除**同形故障**，不声称修好了那次事故的根因。
    - 机械检查：写入前 `test -d <repo>/.arborist`（adopt 脚手架应已铺好；不存在 ⇒ 说明本仓未 adopt 或路径推导错了，**都该 fail-closed 而非补建**）；写入后核对 leaf 的实际落盘路径以 `<repo>/.arborist/agents/` 为前缀，且 `<repo>` 与 `spec.project.path` 一致。
 9. **写 `stopped` 的门槛（自登记指南硬约束）**：只有**会话真正结束**（AgentTUI teardown 或 Mode-B 角色交接、当前会话不再续任）才写 `state: "stopped"`——任务完成 / archive / 末条回复 / 等用户输入 / prompt 空闲 / compact / 上下文重置**都不是会话结束**（定义见 §3「stopped 写入门槛」）。**严禁在本会话仍将继续处理 turn 时标 `stopped`**；这类场景只刷 `last_seen` 心跳。**修复误标**：本人下一个可信触点直接把 `state` 改回 `active` 并刷 `last_seen`（heartbeat 同步项目 leaf 与全局 index）；gardener 复核到 contradiction 条目时亦按此修复、不 GC。

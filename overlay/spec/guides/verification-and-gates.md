@@ -11,6 +11,44 @@
 
 修一条「只靠自觉」的门，首选是**给它一个机械产物**（一个必须产出的落盘物、一个必答的 run-or-skip 记录），**而不是加一条更强的禁令**——更强的禁令同样只能靠自觉，一样会被静默跳过。把「做没做」从**不可审计**翻成**一眼可见**，才真正闭合了门。本篇下面的 **landing manifest** 与 **门控矩阵的「必答时刻」** 都是这条通则的实例；[「已知上游 Trellis 缺口」](#已知上游-trellis-缺口门存在但无执行者)一节则是这条测试**目前答不出**的几处（门写在纸上、执行者在 stock Trellis 里缺席）。
 
+### 共享资源与荣誉制记录必须有机械执行者
+
+同一族问题有三种常见形态；只写纪律都不够，必须把「遗漏」变成机器可见的失败：
+
+1. **共享可变命名空间**：多个并发写入者会争用同一标识或 schema。至少要有**单一分配者**或**机械唯一性校验**，关键命名空间同时具备两者。校验应在写入**前后**各跑一次，重复即 fail；「先扫最大值再加一」仍留 TOCTOU 窗口。
+2. **下游共享消费的事实记录**：推断可以存在，但**不得无标记地被下游当作已核事实**。机械产物 = done 信与 acceptance evidence 的 claim provenance 表：`结论 | 类别（实测/推断）| 出处 | 未验证缺口`。表外叙述不算验收证据；缺表、空出处或推断未声明缺口必须 fail。
+3. **可发现的临时资源**：资源一旦放进共享路径、或其路径被发给别的会话，就必须**假设已有消费者**；「临时」不能只写在文件名、信件或创造者的清理计划里。创建或发布时必须选一种**机械生命周期**，并在收尾 landing manifest 的 `临时/共享资源生命周期` 必答项留证：
+   - provider / 文件系统**能硬失效**：记录不含秘密值的 opaque id/path、owner、已知消费者、最小权限、硬到期时刻与 revoke 方法；
+   - provider **不支持 TTL**：那就不得把它当「共享临时物」。要么留在 owner-private 的 `0700` 目录 / `0600` 文件里且**不发布路径**，要么提升为 managed shared resource，明确 owner、消费者、复核时刻与 rotate/revoke 流程。清理前必须重新核「消费者为零」或取得消费者 teardown 回执；创造者「记得该删」不是证据。
+
+   凭据尤其不得把多个「便于探测」的放宽叠在同一把钥匙上（例如高权限再叠空 allowlist）。manifest 与信件只记元数据与依赖证明，**绝不落明文 secret**。
+
+三条形态各自的机械执行者，就是本篇门控矩阵里对应的那几行：
+
+- **ADR 数字编号**走第一种保护——起草不占号、HITL accept 方统一分配，并由 `python3 .trellis/scripts/validate_adr_numbers.py --visibility <machine-local|product-git>` 按**四位数字前缀**校验（该 validator 的 `--visibility` **无默认值**，缺失或歧义即 fail closed）；它同时检查 proposed 起草阶段与编号后 accept 阶段的可见性。完整规则见 [`repomem-doc-boundary`](./repomem-doc-boundary.md#adr-文件名与编号分配共享命名空间硬规则)。pane ID、全局摘要 schema 与其它共享 registry key 服从同一条规则。
+- **Claim provenance** 走第二种保护——模板给出必填四列表、`validate_claim_provenance.py` 让空白出处/缺口一眼可见。字段语义、命令、错误矩阵、**两个消费点**与存量边界见 [`sendbox`](./sendbox.md#done-信与验收证据的-claim-provenance-门)。
+- **临时/共享资源**走第三种保护——机械产物是下文 landing manifest 的必答项（没命中也必须写 `N/A`）。
+
+三者的共同根因都是**共享消费面没有唯一 owner，或荣誉制记录/生命周期没有机械产物**；它们分别会撞值、让未核推断静默升级成「事实」，或让临时资源在无人知情时变成承重依赖。
+
+### 持久化机制也必须有执行者
+
+**「写进 guide」不是持久化机制的执行者。** 若 guide 已经预言「无强制 `hgit` 步骤时历史只是习惯」，而该失效仍然发生，说明要补的是 hook、收尾必答时刻或定时审计，**而不是再加一段更醒目的措辞**。
+
+overlay 的 `validate_harness_persistence.py` 能对**具名路径**验出 `path@commit`，但它**不会自动触发提交**；因此 human 未授权时它只能准确报「pending human commit authorization」，**不得**把工作树里的「已晋升」说成已持久。技术上可用精确 pathspec 安全提交，不等于执行归属可以转移给旁人（「未经用户明说不提交」同样约束 `hgit`；同行或编排者的建议不能代替 human 授权）。
+
+持久化链条还要继续追问「**保证是否离开本机**」。这里有两档**强度不同**的证据，别混：
+
+| 想声称 | 用什么 | 它证明什么、不证明什么 |
+|---|---|---|
+| 已进入**本机** side history | `validate_harness_persistence.py <exact-path>...` | 逐路径可见、clean、有 commit，输出 `path@commit`。**只证明一块磁盘上的历史** |
+| side history **配了** remote | `--require-remote-configured` | 只证明配置存在；**不证明任何 commit 被推送过**（validator 自己的输出就这么写） |
+| 每个证据 commit 已进入 remote-tracking ref | `--require-remote-reachable`（可用 `--remote` 收窄） | 严格更强；仍诚实标注自身界限——remote-tracking ref 只新鲜到**上次 fetch** |
+
+**刻意没有 `--require-remote`**：这个不带限定的名字读起来像强声称，而廉价检查只支撑弱的那一档 —— 一个名字同时被两种强度共用，正是「验了配置却被描述成跨机持久性」那类事故的入口。
+
+典型 machine-local 布局里：side history 常**无** remote、产品仓有 origin，而 validator 与 ADR 文件又被产品仓排除；**三层必须在 landing manifest 里分别记实**，不得把其中一层的可见性冒充另一层的持久性。
+
 ## 门的触发钉在 hazard 上（通则：别拿代理量当开关）
 
 与上一条「门有执行者吗」并列的另一半：一个门**即便有**执行者，只要它的**触发条件**钉错了地方，仍会系统性误火——执行者忠实地执行了一条对不准风险的触发。
@@ -61,6 +99,10 @@
 | 人工 smoke | **(a) 用户可见/外部接口** 或 **(b) 正确性依赖框架/服务器运行时默认**（任一命中）进收尾前 | auto-judge | (a)(b) 都不命中才跳记 Auto-Skip Log；**(b) 命中的纯后端改动不豁免**，以"纯后端"为由跳 = 越界（Recipe Invariant Exception）|
 | **代码评审** | **每次 full-lane 收尾 / 进 MR 前**（fast-lane 可判 N-A）| **auto-judge（跑它 or 记 skip，必须择一并留痕；绝不静默略过）** | **landing manifest 的「谁评审」栏**（跑了→填评审者；没跑→显式写 `nobody reviewed this`）**＋** 跳过额外记 Auto-Skip Log／越界跳记 Recipe Invariant Exception |
 | **challenge / 红队 subagent** | close-out；触发 **(a) full lane** 或 **(b) authn/authz/secrets/crypto/租户隔离/输入信任边界** 或 **(c) 依赖框架/服务器运行时默认**（同人工 smoke (b)）任一命中，或有晋升候选待 ack | HITL/L4（full-lane 由 L2 收尾起草时派，见 ADR-0004；fast-lane 因 (b)/(c) 触发的由 L4/human 派）| 反调 + 冲突清单落 close-out「待接受包」；候选 ack 与冲突仲裁归 owner |
+| **Claim provenance** | **新 done 信发出前**；**新建 / 实质重写的 acceptance evidence 被接受前**（两个消费点，**非通用 task hook**）| auto | 标准四列表 ＋ `python3 .trellis/scripts/validate_claim_provenance.py <精确路径>` PASS（写进 done 信/manifest）；表外结论不得作为验收依据。**执行者是那两个时刻的人/agent —— 没有 CI 能看见任意 adopter 的 sendbox**，见 [`sendbox`](./sendbox.md#done-信与验收证据的-claim-provenance-门) |
+| **ADR 数字前缀唯一 + 两阶段可见性** | proposed 起草完成时；每次 accept 的改名/状态写入**前**与**后** | auto | `python3 .trellis/scripts/validate_adr_numbers.py --visibility <machine-local\|product-git>`（**该 flag 无默认值，缺失/歧义 exit 2 fail closed**）拒绝重复四位前缀与任何被记规范那个 git 忽略的 `decisions/*.md`；accept 前后两次均须 PASS 并记入 landing manifest |
+| **Harness persistence（machine-local）** | canonical spec/ADR/validator/tool 落盘后；human 授权 `hgit` commit 并执行后 | ask-first | landing manifest 的 `History proof` 必答项：精确 pathspec ＋ `python3 .trellis/scripts/validate_harness_persistence.py <exact-path>...` 逐路径 clean 且输出 `path@commit`。**未获授权写 `pending human commit authorization`，不得声称 durable**；要谈「离开本机」按 [两档强度](#持久化机制也必须有执行者)选 flag |
+| **临时 / 共享资源生命周期** | 创建、发布路径、开始消费、rotate/revoke/删除**任一**时刻；close-out 必答 | auto-judge | landing manifest 必须写 `N/A（本次未创建/发布/消费/清理）`，或逐资源给出**不含 secret** 的 owner / consumer / 权限 / 硬到期（或 managed 提升）/ 清理前「消费者为零」证据 |
 | HITL 晋升（ADR/spec 落盘）| close-out | HITL（L4/human）| **landing manifest（无条件产出，含为空）** ＋ 前置 Challenge-before-ack |
 
 **代码评审这一行是本矩阵的要点**：评审此前只出现在下面「代码评审」叙述与工具表里，流程里**没有任何一步会强制到达「评审跑了没」这个问题**——于是执行可以既不跑评审、也不记 skip，因为没有一个必答的时刻。补上这一行后，收尾**必然**撞到「跑它 or 记 skip」，而答案就落在同一个 close-out 的 landing manifest 里（评审者姓名，或显式的 `nobody reviewed this`），一眼可审。
@@ -83,6 +125,8 @@ HITL 晋升门（下条）本身**只靠执行方记得「落盘前先给人看�
   4. **谁评审**——**`nobody reviewed this` 是显式允许写出的值**。
 - **关键反转**：**写 `nobody reviewed this` 不是违规；省略 manifest 才是。** 这条门不禁止「没人评审就落盘」（那是 owner 看到 manifest 后自己拿捏的取舍），它只强制「有没有人评审」这件事**被写出来、可一眼看到**。把一个不可审计的荣誉制门，换成一个必答的、可被 owner/HITL 扫一眼就发现的落盘物。
 - **谁看它**：full-lane 下 landing manifest 是 L2 收尾**「待接受包」**的一部分（见 [`roles-and-tiering.md`](./roles-and-tiering.md) 收尾职责分层）；L4 轻量 accept + HITL 晋升就对着这份 manifest 逐条决定翻不翻 `proposed→accepted`。凡「谁评审 = `nobody reviewed this`」且类别是 `跨切 guide`/`ADR` 的项，天然是 owner 该重点看的。
+- **`History proof` 必答项**：每个 canonical spec/ADR/validator/tool 路径还要写 `path@hgit-commit`；human 尚未明确授权提交时写 `pending human commit authorization`。**文件已写、已进索引、或 `hgit status` 看得见，都不等于已持久**；要谈「保证离开本机」再按上文[两档 remote 强度](#持久化机制也必须有执行者)选 flag，别用弱档冒充强档。精确校验命令与状态对照表见 [`repomem-doc-boundary`](./repomem-doc-boundary.md#machine-local-的已晋升必须有-hgit-commit-证据)。
+- **`临时/共享资源生命周期` 必答项**：manifest 末尾另写一行。**没有命中也必须写** `N/A（本次未创建/发布/消费/清理可发现的临时资源）`；命中则按上文[三形态第 3 条](#共享资源与荣誉制记录必须有机械执行者)列出不含 secret 的 lease / managed 元数据与清理前的依赖证明。**没有这一行，「创造者稍后记得清理」仍是不可见的荣誉制。**
 - 与 [`knowledge-closeout.md`](./knowledge-closeout.md) 的关系：知识收尾门扫「改动**连累**到的改动面外文档」，landing manifest 记「本次**主动落/改**了哪些盘、谁看过」——前者查一致性、后者记归属与评审可见性，收尾时**都产出**。
 
 ## Merge Gates + Challenge-before-ack + HITL 晋升门
