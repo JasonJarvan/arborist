@@ -6,6 +6,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
 ## [Unreleased]
 
 ### Added
+- **Brand-capacity observer + safe AgentTUI launch contract** (`overlay/spec/guides/agenttui-launch-and-brand-capacity.md`,
+  `overlay/spec/guides/decisions/0008-brand-capacity-and-safe-launch.md`) — a single-writer, stdlib-only,
+  no-network, no-credentials observer (`overlay/scripts/arborist_brand_capacity.py` + tests) that reads
+  Codex rate-limits passively from local rollout logs, polls Claude Code capacity mechanically via
+  `claude -p /usage` (credence-gated: zero-side-effect proof required, else fail closed), keeps a
+  self-report fallback, and gives a read-only brand recommendation **only** when creating a new Impler —
+  with `source`/freshness always explicit and unknown/stale never disguised as fresh headroom. The guide's
+  §1 documents the safe-launch invariants (one AgentTUI per tab, `new-tab` start that clears the inherited
+  session-context identity, resolve-and-verify a stable non-plugin pane before any bootstrap write, launcher
+  picks the binary while the launched session self-registers its real brand). Ships a `tool.json` template
+  (`arborist-brand-capacity`, optional) plus adopt wiring into `.trellis/scripts/`. ADR-0008 records the
+  three decisions; the collector supersedes the issue's "unknown unless a registered session self-reports" prose.
 - **AgentTUI registry** guide (`overlay/spec/guides/agenttui-registry.md`) — `.arborist/`
   global–project cascade, spec/runtime schema, self-registration and lifecycle; scaffold templates
   plus adopt wiring; explainer pages under `docs/wiki/`.

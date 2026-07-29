@@ -43,6 +43,9 @@ cp "$SRC/scripts/hgit" "$ROOT/hgit"; chmod +x "$ROOT/hgit"
 # 放 .trellis/scripts/ 而非 scripts/：脚本靠 __file__.parents[2] 定位 repo root，须两级深。
 mkdir -p "$ROOT/.trellis/scripts"
 cp "$SRC/scripts/agenttui.py" "$ROOT/.trellis/scripts/"; chmod +x "$ROOT/.trellis/scripts/agenttui.py"
+# brand-capacity observer（单写者容量观测 + 建 Impler 前只读推荐；不启停会话/不改注册/不碰凭证）。
+# 同样靠 __file__.parents[2] 定位 repo root，须放 .trellis/scripts/（两级深）。
+cp "$SRC/scripts/arborist_brand_capacity.py" "$ROOT/.trellis/scripts/"; chmod +x "$ROOT/.trellis/scripts/arborist_brand_capacity.py"
 
 echo "→ 铺 .work_context 模板（不覆盖已存在）"
 mkdir -p "$ROOT/.work_context"
@@ -179,6 +182,9 @@ offer_tool() { # $1=命令名 $2=装法 $3=fallback
 offer_tool agentsview '从其发布渠道装二进制，`agentsview serve` 启动' '手翻本地 journal / 各 brand 会话目录'
 offer_tool multica    '`multica setup` / `multica login`' '台账退化为本地 .trellis/tasks/ + sendbox 交办；WIMTB 本地留档'
 offer_tool codegraph  '`codegraph init && codegraph install`' '无符号图谱 MCP → 退回 grep/glob 检索代码'
+# arborist-brand-capacity 无 offer_tool 行：它随 harness 铺（脚本上面已 cp 到 .trellis/scripts/，
+# tool.json 模板随 arborist-templates/tools 递归铺），无外部安装步骤 —— 与 agenttui 同先例。
+# offer_tool 用 command -v 探 PATH 二进制，对随附脚本会误报「未安装」，故不用。
 
 cat <<'NEXT'
 
