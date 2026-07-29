@@ -63,7 +63,7 @@
 | 级别 | 例子 | init（adopt.sh）行为 | 缺席后果 |
 |---|---|---|---|
 | `required` | Trellis、Superpowers | **醒目告警「不装没法用」+ 给出明确装法**；不中断铺设（铺设永远能完成），但 harness 视为不完整 | harness 不完整，核心 workflow 跑不起来 |
-| `optional` | agentsview、Multica、codegraph | **逐个问用户要不要**——同意且已装 → 登记进注册表（写 `tool.json`，幂等：已存在不覆盖）；未装 → 只**打印装法**（不代装）；拒绝 → 记未登记，打印该工具 `fallback` 一行 | 该能力走 `fallback` 兜底，**不报错卡住** |
+| `optional` | agentsview、Multica、codegraph、arborist-brand-capacity | **逐个问用户要不要**——同意且已装 → 登记进注册表（写 `tool.json`，幂等：已存在不覆盖）；未装 → 只**打印装法**（不代装）；拒绝 → 记未登记，打印该工具 `fallback` 一行 | 该能力走 `fallback` 兜底，**不报错卡住** |
 
 - **非交互降级**：stdin 非 TTY（CI / pipe）时不 prompt，只打印各工具「已装/未装 + 装法 + fallback」汇总，不失败。
 - **边界（不可越）**：置备段**从不自动下载/安装任何东西、从不改 agent 配置（MCP 接线）**；「写注册表 JSON」属静态表铺设，不算接线。装好工具后的登记可重跑 adopt 或照 §2 模板手写。
