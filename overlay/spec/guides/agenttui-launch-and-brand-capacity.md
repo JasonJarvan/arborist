@@ -11,13 +11,30 @@
 ### 不变量
 
 1. **一 tab 一 AgentTUI**：每个 Zellij tab 只承载一个 AgentTUI 会话，避免同 tab 内多会话身份/焦点混淆。
-2. **以 new-tab 的初始命令原子启动**，而非往匿名焦点 pane 打字。启动同时**清除继承的 session-context 身份**，让子会话自建身份：
+2. **以 new-tab 的初始命令原子启动**，而非往匿名焦点 pane 打字。启动同时**清除继承的 session-context 身份**，让子会话自建身份；并且**以 bypass（最高权限）模式启动**（见不变量 2b）：
 
    ```
-   zellij new-tab -- env -u TRELLIS_CONTEXT_ID <claude|codex>
+   zellij new-tab -- env -u TRELLIS_CONTEXT_ID <cli> <bypass-flag>
    ```
 
    `TRELLIS_CONTEXT_ID` 是 session-context 身份变量；不 `-u` 清掉它，子会话会**继承父 session 身份**、进而投错 pane 或替被启动方猜/写 brand。
+
+2b. **一律以 bypass（最高权限 / 免沙箱）模式启动**——这不只是省掉权限提示打断，而是**能力层面的硬约束**：
+
+   默认沙箱会把被启动会话的**出向直投单向阉割**。实测（一个 adopter 实例，2026-07-30）：一个以默认沙箱（approval 已 never、但 sandbox 仍 workspace-write）启动的 Codex ATUI——
+
+   | 方向 | 结果 |
+   |---|---|
+   | **入向**（别人 `write-chars --pane-id` 投给它） | **通** |
+   | **出向**（它自己执行终端复用器命令回投） | **全废**，一律报「无活动 session」 |
+
+   根因是**沙箱隔离了终端复用器的 unix socket**（zellij 在 `${XDG_RUNTIME_DIR}/zellij` 一类路径）。旁证：隔离环境里 `list-sessions` 返回的是一份**幻影列表**（真实会话的创建时间被报错、并凭空多出已退出条目），自救 `attach` 时用的是临时 `XDG_CACHE_HOME`。⚠️ **别据幻影列表判断会话存在性**，也别让被困会话在 socket 路径上反复试探烧 token——直接换 bypass 重启。
+
+   **后果对读表方不可见**：这样的会话 `state=active`、`pane_ref` 齐全、能登记、能被发现、能被投递，但**发不出**直投，出向只剩 sendbox 写信。注册表**看不出**这一点，它自己在探测前也不知道。故 [agenttui-registry §3](./agenttui-registry.md) 的三通道模型在默认沙箱下**被单向削成两通道**。
+
+   > **换终端复用器不能替代本条**：unix socket 隔离与复用器选择无关（tmux 等同样靠 unix socket），沙箱照样挡。bypass 是必要条件，不是 zellij 特有的绕法。
+
+   两 brand 的具体 flag 属 adopter 本地实况（Claude Code / Codex 各有其「跳过权限」「绕过审批与沙箱」开关），本规范不写死 flag 拼写——只规定**必须以 bypass 模式启动**，并按不变量 6 守住越权面。
 3. **resolve 并校验一个稳定的非插件 pane_id**，再做任何 bootstrap 写：
 
    ```
@@ -36,7 +53,7 @@
    >
    > pane 存在性**先 preflight**：用 `focus-pane-id`（不存在时明确打印 `Pane with id Terminal(<N>) not found`），**并解析 stdout 文本——它 rc 也是 `0`**（上游 gardener 已独立复现）；**不得**用 `dump-screen -p` 判存在性（对不存在的 pane **静默返回空且 rc=0**，会得假阳性）。
 5. **被启动会话自登记其真实 brand 与 pane 引用**（见 [agenttui-registry §2](./agenttui-registry.md) 的 `spec.json.brand` / `runtime.pane_ref`）。**启动器绝不代写 brand**——它只选启动哪个 CLI 二进制，实际 runtime brand 由被启动会话按 [ADR-0006](./decisions/0006-runtime-brand-is-routing-authority.md) 自登记。
-6. **绕过权限提示时保留 ask-first / HITL 边界**：被启动 CLI 若以绕过权限提示的模式运行，仍须遵守 [execution-policy](./execution-policy.md) 的 ask-first / HITL 门；guide 与 bootstrap 文案须显式标注越权面与人工确认点，不得因「已绕提示」而静默做不可逆操作。
+6. **bypass 模式下必须靠纪律守住 ask-first / HITL 边界**：不变量 2b 把 bypass 从「可能会绕」变成**默认如此** ⇒ **CLI 层不再有任何提示会替你兜底**，越权面完全由 [execution-policy](./execution-policy.md) 的 ask-first / HITL 门约束。本条的分量因此**变重**（方向不变）：guide 与 bootstrap 文案须显式标注越权面与人工确认点，**不得**因「已绕提示」而静默做不可逆操作。判据不变——不可逆 / 对外可见的动作先问人，approval 在一个上下文成立不自动延续到下一个。
 
 > 与 [agenttui-registry §3](./agenttui-registry.md) 的投递契约同源：pane 定向（`--pane-id`）在两侧通用——启动侧用于 bootstrap 定向，投递侧用于跨会话注入。本规范是其**启动侧姊妹**。
 
