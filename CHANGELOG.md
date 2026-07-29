@@ -57,6 +57,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
 - **Close-out discipline** — decision-requests must carry structure; the impler converges by asking
   rather than re-delegating; ADR-0004 Residual tightened.
 
+### Fixed
+- **Delivery-contract corrections from dogfood** (`overlay/spec/guides/agenttui-registry.md` §3–§5,
+  ADR-0007 Amendment 2026-07-29) — five spec-level defects, each tagged with its evidence grade
+  (independently reproduced upstream vs. measured downstream and not yet reproduced):
+  (1) the delivery-evidence rule assumed transcripts are **append-only**, so a compact / rollout
+  rewrite turned a genuinely delivered envelope into `queued-unverified` — a **false negative** that
+  invites the duplicate re-send rule 2 forbids; evidence is now an **inode+size fingerprint** with a
+  documented **full-file nonce fallback** and explicit evidence grades
+  (`…-after-boundary` vs `…-fullfile`), plus the argument for why a per-send unique nonce makes the
+  fallback false-positive-free; (2) "`--pane-id` injects without focus" was **wrong** — cross-tab
+  injection requires focusing first, so delivery **steals focus** and structurally conflicts with a
+  human driving the same multiplexer session; recorded as a **known architectural limitation** with
+  multiplexer choice under evaluation (no replacement promised); (3) a new contract rule for
+  **pane-existence preflight**: probes must parse stdout (exit code is 0 even for a missing pane) and
+  must not use the read-screen command that returns **silently empty** for a nonexistent pane;
+  (4) backfilled cross-directory `--resume` lookup (Codex resume works across directories, Claude
+  Code `--resume` must run inside the target project directory); (5) two upstream-found spec holes —
+  transcript mtime advances for **external headless resume** too, so `contradiction` is a **weak
+  signal** and must be reviewed by inspecting what grew, and **half-registered has two directions**
+  (index-without-leaf and leaf-without-index) that both must be detected and reported; plus a
+  self-registration **fail-closed path gate** (missing `<repo>/.arborist/` must report
+  half-registered instead of silently walking up to the parent directory).
+  The shipped adapter's **unimplemented contract clauses are now listed explicitly** in the guide
+  rather than being papered over as "contract satisfied".
+
 ### Origin — forked from Arbor
 Arborist is a fork of [Arbor](https://github.com/JasonJarvan/arbor) (Apache-2.0), reduced to the
 **pure Trellis + HarnessStack harness with the CCB multi-agent runtime removed**. It is the

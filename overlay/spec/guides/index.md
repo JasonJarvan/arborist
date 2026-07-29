@@ -15,7 +15,7 @@
 | [Verification & Gates](./verification-and-gates.md) | 门有执行者吗（通则）+ 多 lens 验证 + security-scan 接 MR 硬门 + 门控矩阵（含代码评审行）+ landing manifest + Challenge-before-ack + 已知上游 Trellis 缺口 | 验证、发 MR、晋升知识、给荣誉制门配机械产物 |
 | [Sendbox 定向交办](./sendbox.md) | 跨 session 角色交办（read_first 绝对路径 + process-completeness + 生命周期/WIMTB）+ 持久化形态 A/B · fyi 信型 | durable handoff / 回报 |
 | [Dashboard 待办投影](./dashboard.md) | 跨 session「此刻轮到人做什么」单一视图 | 多 session/待办堆积 |
-| [AgentTUI 注册表](./agenttui-registry.md) | 并发 session 同伴发现：`.arborist/` 级联 + spec/runtime schema + 声明/派生状态模型（含 stopped 写入 guard + 活转录矛盾检测/reconcile）+ 自登记 | 开新 session 自登记、找同伴、gardener 维护注册表 |
+| [AgentTUI 注册表](./agenttui-registry.md) | 并发 session 同伴发现：`.arborist/` 级联 + spec/runtime schema + 声明/派生状态模型（含 stopped 写入 guard + 活转录矛盾检测/reconcile）+ 自登记（含写入路径 fail-closed 门）+ 投递契约（送达证据等级、pane 存在性探针、随发 adapter 缺口清单） | 开新 session 自登记、找同伴、投递给同伴、gardener 维护注册表 |
 | [安全启动 AgentTUI + brand-capacity observer](./agenttui-launch-and-brand-capacity.md) | §1 安全启动独立 ATUI 契约（一 tab 一 ATUI + new-tab 清父身份 + resolve 稳定非插件 pane + 定向 bootstrap + 被启动方自登记 brand + HITL）；§2 单写者 observer 契约（CLI/schema/source+freshness）+ §2.4 Claude `/usage` collector；§3 建 Impler 前 selection 语义 | 启动独立新 AgentTUI、建新 Impler 前按容量选 brand |
 | [工具注册表 / 插件层](./tool-registry.md) | 可选能力发现：`.arborist/tools/` 级联 + `tool.json` schema + required/optional 置备与逐工具 fallback + 工具已知局限（`known_limits`：静默漏/静默空 → 交叉核验 + prefer 必配 fallback） | 需要某可选能力（历史检索/台账/…）、登记新工具、adopt 置备、写「prefer tool X」的 spec 行 |
 | [知识收尾（洁癖式）](./knowledge-closeout.md) | 交付后全仓知识一致性门：事实面矩阵 + 两阶段汇报 + 触发分级（含 `/neat` 手动触发词表，覆盖 fast-lane 跳过）+ landing manifest（无条件产出）；收尾方自跑 | full lane/milestone 收口、`/neat`/neat skill/洁癖 skill 显式点名、扫改动面外的过期文档/规则/记忆 |
@@ -35,5 +35,5 @@
 | [0004](./decisions/0004-closeout-split-l2-draft-l4-accept.md) | 收尾职责分层 — L2 起草 / L4 轻量 accept | accepted | rootorc-methodology |
 | [0005](./decisions/0005-agenttui-role-lineage-vs-generation.md) | AgentTUI 注册表补角色继承代数 lineage（与 generation 正交） | accepted | adopter-rootorc-v2 + gardener |
 | [0006](./decisions/0006-runtime-brand-is-routing-authority.md) | actual runtime brand 是 subagent 路由唯一权威 | accepted（+2026-07-26 amend.） | human brand-compat ruling + gardener |
-| [0007](./decisions/0007-agenttui-delivery-contract-pluggable-adapter.md) | AgentTUI 活 pane 投递 = 契约进规范 + 具体传输作可插拔 adapter | accepted | dogfood + rootorc |
+| [0007](./decisions/0007-agenttui-delivery-contract-pluggable-adapter.md) | AgentTUI 活 pane 投递 = 契约进规范 + 具体传输作可插拔 adapter | accepted（+2026-07-29 amend.：送达证据双指纹/全文降级 + 抢焦点局限 + 存在性探针 + 跨目录 resume 回填） | dogfood + rootorc |
 | [0008](./decisions/0008-brand-capacity-and-safe-launch.md) | 容量是观测非权威 headroom / observer 只观测 / launcher 选二进制 session 自登记 brand | accepted | issue #14 |
