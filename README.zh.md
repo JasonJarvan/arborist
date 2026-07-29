@@ -136,6 +136,7 @@ Arborist 的核心是它的纪律 + 方法论 guides，铺进 `.trellis/spec/gui
 | [Sendbox 定向交办](./overlay/spec/guides/sendbox.md) | 跨 session 定向交办信（read_first 绝对路径 + process-completeness + 生命周期/WIMTB） |
 | [Dashboard 待办投影](./overlay/spec/guides/dashboard.md) | 跨 session「此刻轮到人做什么」单一投影 |
 | [AgentTUI 注册表](./overlay/spec/guides/agenttui-registry.md) | 并发 session 同伴发现：`.arborist/` 级联 + spec/runtime schema + 声明/派生状态模型 + 自登记 |
+| [安全启动 AgentTUI + brand-capacity observer](./overlay/spec/guides/agenttui-launch-and-brand-capacity.md) | 安全启动不变量（一 tab 一 ATUI、清父身份、resolve 稳定非插件 pane、启动器选二进制而会话自登记 brand）+ 单写者无凭证容量 observer（source/freshness 显式、仅建 Impler 前推荐） |
 | [工具注册表](./overlay/spec/guides/tool-registry.md) | 可选能力插件层：`.arborist/tools/` 级联 + `tool.json` schema + required/optional 置备与逐工具 fallback |
 | [知识收尾（洁癖式）](./overlay/spec/guides/knowledge-closeout.md) | 交付后全仓知识一致性门：事实面矩阵 + 两阶段汇报 + 触发分级（收尾方自跑，补 trellis-check 改动面之外）；可在任意 lane 用 `/neat`、`neat skill`、`洁癖 skill` 手动触发 |
 | [HS 15-step 落点映射](./overlay/spec/guides/pipeline-mapping.md) | HarnessStack 15 步 → Trellis 阶段/guides 对照 |
