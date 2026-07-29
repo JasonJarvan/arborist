@@ -1,7 +1,108 @@
 #!/usr/bin/env bash
 # 本地 harness 版本控制（独立 git-dir、无 remote；产品仓看不见）。当 git 用：
 #   ./hgit status | ./hgit log | ./hgit diff | ./hgit checkout <sha> -- <path>
-# 快照新改动： ./hgit add -f .trellis .mcp.json scripts/trellis_multica_sync.py AGENTS.md .work_context && ./hgit commit -m "..."
+# 落定 harness 改动（推荐入口）：
+#   ./hgit snapshot && ./hgit commit -m "..."
+#   ./hgit snapshot --dry-run     # 只列将要暂存什么，不动 index
+# snapshot = 按【显式 durable 白名单】暂存，逐文件剔掉凭证 / 缓存 / 备份。
+# 别再手写 `add -f .trellis .work_context` 一类整面 force-add：那会把 `*.env`（如
+# `.work_context/multica.env`）与运行时机器态钉成 tracked —— 钉上就再也隐不回去
+# （exclude 只管未跟踪文件），且违背「凭证绝不进史」。
+# 删除某个 durable 文件时用 `./hgit rm <path>`：snapshot 只暂存现存内容，不推断删除。
+# 有意不设 `set -e/-u`：透传子命令退出码（`./hgit diff --quiet` 靠 rc 表意），且空 `"$@"`
+# 在老 bash 下遇 nounset 会误报 unbound。
 root="$(cd "$(dirname "$0")" && pwd)"
-exec git --git-dir="$root/.harness-vcs" --work-tree="$root" \
-     -c user.name="harness-local" -c user.email="harness@localhost" "$@"
+
+run_git() {
+  git --git-dir="$root/.harness-vcs" --work-tree="$root" \
+      -c user.name="harness-local" -c user.email="harness@localhost" "$@"
+}
+
+# durable 面白名单 —— 侧史该记的「知识」，与 .harness-vcs/info/exclude 的 allowlist 同一套判据：
+# canonical spec/guides/ADR、随附 durable 脚本、项目级 tool.json、sendbox 原始信件、
+# workflow 定制层与 hooks 接线、brand-compat 产物。产品源码 / 运行时机器态（tasks、
+# workspace、.arborist/agents、Dashboard 投影）/ 凭证一概不在其中。
+SNAPSHOT_PATHS=(
+  .trellis/spec
+  .trellis/scripts
+  .trellis/workflow.md
+  .trellis/config.yaml
+  .arborist/tools
+  .work_context/sendbox
+  AGENTS.md
+  hgit
+  .claude/agents/trellis-implement-full.md
+  .claude/agents/trellis-explore.md
+  scripts/trellis_multica_sync.py
+  scripts/install-brand-compat.py
+  scripts/validate_brand_compat.py
+)
+
+# 噪声剔除【不能】用 pathspec `:(exclude)`：git 算 common prefix 只看正向 pathspec，再把该
+# 前缀长度从 exclude 项的匹配串上减掉；正向 pathspec 一旦带目录前缀（`.arborist/tools`、
+# `.claude/agents/x.md`），指针就越过串尾 → 正向路径被静默误排除，rc=0、无 stderr。
+# 故改为自己枚举文件、按名过滤，再具名 add（不带任何 exclude pathspec）。
+snapshot_is_noise() { # $1=相对路径；命中噪声 → 返回 0
+  case "$1" in
+    *.env|*.pyc|*.pyo|*.bak|*.orig|*.rej|*.swp|*~) return 0 ;;
+    *.DS_Store) return 0 ;;
+    *__pycache__/*) return 0 ;;
+  esac
+  return 1
+}
+
+# 枚举白名单里现存的文件（NUL 分隔、绝对路径）。-H：白名单项自身是 symlink 时也跟随
+# （worktree 会把 harness 目录 symlink 回主树，见 scripts/harness_worktree_link.sh）。
+snapshot_list() {
+  local p
+  for p in "${SNAPSHOT_PATHS[@]}"; do
+    [ -e "$root/$p" ] || continue
+    if [ -d "$root/$p" ]; then
+      find -H "$root/$p" \( -type f -o -type l \) -print0
+    else
+      printf '%s\0' "$root/$p"
+    fi
+  done
+}
+
+snapshot() {
+  local dry_run=0 file rel
+  case "${1-}" in
+    --dry-run|-n) dry_run=1 ;;
+    "") ;;
+    *) echo "✗ hgit snapshot：未知参数 '$1'（只支持 --dry-run）" >&2; return 2 ;;
+  esac
+
+  local -a picked=() skipped=()
+  while IFS= read -r -d '' file; do
+    rel="${file#"$root/"}"
+    if snapshot_is_noise "$rel"; then
+      skipped+=("$rel")
+    else
+      picked+=("$rel")
+    fi
+  done < <(snapshot_list)
+
+  if [ "${#skipped[@]}" -gt 0 ]; then
+    printf '  · 剔除 %s 个（凭证/缓存/备份，绝不进史）：\n' "${#skipped[@]}"
+    printf '      %s\n' "${skipped[@]}"
+  fi
+  if [ "${#picked[@]}" -eq 0 ]; then
+    echo "  · durable 白名单下无可暂存文件（还没 adopt？）"
+    return 0
+  fi
+  if [ "$dry_run" = 1 ]; then
+    printf '  · 将暂存 %s 个 durable 文件：\n' "${#picked[@]}"
+    printf '      %s\n' "${picked[@]}"
+    return 0
+  fi
+  # -f 必需：durable 面对产品仓 `.gitignore` / 侧史 exclude 都可能是「被忽略」的，而 snapshot
+  # 的整个存在意义就是【不依赖 untracked 可见性】。白名单已逐文件过滤，-f 不会带上噪声。
+  run_git add -f -- "${picked[@]}" || return $?
+  printf '  ✓ 已暂存 %s 个 durable 文件；复核 `./hgit status` 后 `./hgit commit -m "..."`\n' "${#picked[@]}"
+}
+
+case "${1-}" in
+  snapshot) shift; snapshot "$@" ;;
+  *) run_git "$@" ;;
+esac
