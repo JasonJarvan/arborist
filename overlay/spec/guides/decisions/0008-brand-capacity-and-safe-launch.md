@@ -35,5 +35,5 @@ Arborist adopter 需要两项相关能力:安全启动独立 AgentTUI(不继承�
 
 ## 与既有 ADR 一致
 - **ADR-0006(actual runtime brand 是路由权威)**:决策 3 的「launcher 选二进制、session 自登记 brand」是同一原则在**启动/选 brand 维度**的延伸——启动器不代写、runtime 自登记。
-- **ADR-0007(投递契约 + 可插拔 adapter)**:本 ADR 的启动契约(guide §1)是投递契约的**启动侧姊妹**,共用 pane 定向(`--pane-id`)与「fail-closed、不猜」取向;core 仍 transport 中立(命令用泛化占位)。
+- **ADR-0007(投递契约 + 可插拔 adapter)**:本 ADR 的启动契约(guide §1)是投递契约的**启动侧姊妹**,共用 pane **寻址**(`--pane-id`)与「fail-closed、不猜」取向;core 仍 transport 中立(命令用泛化占位)。**2026-07-29 修正**:`--pane-id` 寻址**不免除聚焦**(跨 tab 须先 `focus-pane-id`),故启动侧 bootstrap 写与投递侧注入**同样会抢焦点**——与人类同 session 操作结构性冲突,属两侧共担的已知架构局限,详见 [ADR-0007 Amendment](./0007-agenttui-delivery-contract-pluggable-adapter.md) 与 guide §1 第 4 点。
 - **ADR-0002(声明+派生态,无守护进程)**:observer `serve` 是**可选前台循环、非 daemon**,与「core 无守护进程」一致;快照是读时消费的声明态,freshness 由消费方判定。

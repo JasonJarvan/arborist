@@ -25,11 +25,16 @@
    ```
 
    按 `tab_name` + `cwd` + `command` 组合定位目标的 `terminal_<N>`（真实终端 pane，**排除插件 pane**）。多候选 / 冲突 / 无匹配 → **fail closed**（停下人工确认），绝不猜。
-4. **所有 bootstrap 写显式定向到该 pane**，绝不写焦点 pane：
+4. **所有 bootstrap 写显式寻址到该 pane**，绝不依赖「当前焦点恰好是它」：
 
    ```
+   zellij action focus-pane-id terminal_<N>      # 见下方 ⚠️：--pane-id 不免除聚焦
    zellij action write-chars --pane-id terminal_<N> "<bootstrap text>"
    ```
+
+   > ⚠️ **`--pane-id` 寻址不免除聚焦**（实测：一个 adopter 实例的 dogfood 巡检；上游 gardener 未独立复现）：`write-chars --pane-id` **跨 tab 不生效**，必须先 `focus-pane-id` 把焦点切到目标 pane。因此 **bootstrap 写会抢焦点**，与「人类正在同一 zellij session 里切 tab / 移焦点」**结构性冲突**——这是与投递侧同源的**已知架构局限**（见 [agenttui-registry §3 投递契约](./agenttui-registry.md) 与 [ADR-0007 Amendment](./decisions/0007-agenttui-delivery-contract-pluggable-adapter.md)）；终端复用器选择**正在评估**，本规范不承诺任何替代方案。唯一诚实的规避：bootstrap 期间避免人机同时操作同一 session。
+   >
+   > pane 存在性**先 preflight**：用 `focus-pane-id`（不存在时明确打印 `Pane with id Terminal(<N>) not found`），**并解析 stdout 文本——它 rc 也是 `0`**（上游 gardener 已独立复现）；**不得**用 `dump-screen -p` 判存在性（对不存在的 pane **静默返回空且 rc=0**，会得假阳性）。
 5. **被启动会话自登记其真实 brand 与 pane 引用**（见 [agenttui-registry §2](./agenttui-registry.md) 的 `spec.json.brand` / `runtime.pane_ref`）。**启动器绝不代写 brand**——它只选启动哪个 CLI 二进制，实际 runtime brand 由被启动会话按 [ADR-0006](./decisions/0006-runtime-brand-is-routing-authority.md) 自登记。
 6. **绕过权限提示时保留 ask-first / HITL 边界**：被启动 CLI 若以绕过权限提示的模式运行，仍须遵守 [execution-policy](./execution-policy.md) 的 ask-first / HITL 门；guide 与 bootstrap 文案须显式标注越权面与人工确认点，不得因「已绕提示」而静默做不可逆操作。
 
