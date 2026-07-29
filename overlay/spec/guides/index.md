@@ -32,9 +32,9 @@
 |---|---|---|---|
 | [0001](./decisions/0001-agenttui-session-id-primary-key.md) | AgentTUI 注册表以 session-id 为主键 | accepted | dogfood |
 | [0002](./decisions/0002-agenttui-declared-derived-state-model.md) | AgentTUI 状态用声明态+读时派生态模型（无守护进程） | accepted（+2026-07-26 amend.） | dogfood |
-| [0003](./decisions/0003-cross-session-reach-semantics.md) | `session_id` 触达语义 = `--resume` 追加，据活性选通道 | accepted | gardener |
+| [0003](./decisions/0003-cross-session-reach-semantics.md) | `session_id` 触达语义 = `--resume` 追加，据活性选通道 | accepted（+2026-07-30 amend. 2：cwd 硬前置） | gardener |
 | [0004](./decisions/0004-closeout-split-l2-draft-l4-accept.md) | 收尾职责分层 — L2 起草 / L4 轻量 accept | accepted | rootorc-methodology |
 | [0005](./decisions/0005-agenttui-role-lineage-vs-generation.md) | AgentTUI 注册表补角色继承代数 lineage（与 generation 正交） | accepted | adopter-rootorc-v2 + gardener |
 | [0006](./decisions/0006-runtime-brand-is-routing-authority.md) | actual runtime brand 是 subagent 路由唯一权威 | accepted（+2026-07-26 amend.） | human brand-compat ruling + gardener |
-| [0007](./decisions/0007-agenttui-delivery-contract-pluggable-adapter.md) | AgentTUI 活 pane 投递 = 契约进规范 + 具体传输作可插拔 adapter | accepted（+2026-07-29 amend.：送达证据双指纹/全文降级 + 抢焦点局限 + 存在性探针 + 跨目录 resume 回填） | dogfood + rootorc |
+| [0007](./decisions/0007-agenttui-delivery-contract-pluggable-adapter.md) | AgentTUI 活 pane 投递 = 契约进规范 + 具体传输作可插拔 adapter | accepted（+07-29 amend.：双指纹/全文降级 + 抢焦点局限 + 规则 5 存在性探针 + 跨目录 resume 回填；+07-30 amend.2：规则 6 发送侧能力检查、否决 `brand_version`） | dogfood + rootorc |
 | [0008](./decisions/0008-brand-capacity-and-safe-launch.md) | 容量是观测非权威 headroom / observer 只观测 / launcher 选二进制 session 自登记 brand | accepted | issue #14 |

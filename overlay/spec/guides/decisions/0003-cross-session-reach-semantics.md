@@ -33,7 +33,7 @@ gardener 于一次性 throwaway session 实证 `claude -p --resume`：
 
 ## 后果
 - 正：触达句柄语义明确、可执行；据活性探针选通道，既用上原生能力又避开未证风险；与 sendbox（durable handoff）分工清晰。
-- 负：无原生回执，双向 / 等回复仍需外层协调（sendbox 回信 / mailbox / 轮询）。遗留（归 gardener 待测回填）：跨目录 / 跨项目 `--resume` 的 lookup 行为；~~活-TUI 并发 resume 的确切竞争表现~~（已由 Amendment 解决）。
+- 负：无原生回执，双向 / 等回复仍需外层协调（sendbox 回信 / mailbox / 轮询）。遗留（归 gardener 待测回填）：~~跨目录 / 跨项目 `--resume` 的 lookup 行为~~（已由 Amendment 2 结项）；~~活-TUI 并发 resume 的确切竞争表现~~（已由 Amendment 1 解决）。
 
 ## Amendment（2026-07-23）
 
@@ -52,3 +52,16 @@ gardener 于一次性 throwaway session 实证 `claude -p --resume`：
 「被否方案」表相应更新：「一律用 `--resume` 直投（含活 peer）」作为**送达手段**不再被否；被否的只剩「durable 内容**只**直投、不写信」（缺可独立评审的信物与审计面）。活性探针保留原价值：预估触达时延 + gardener GC。
 
 同步修改：`agenttui-registry.md` §3 触达段已按此重写（三通道 + 记录⊥送达正交，不再按对方活性或单纯消息性质二分）。
+
+## Amendment 2（2026-07-30）—— 通道① 的目录前置（结项本 ADR 的遗留）
+
+**本 ADR「后果」节里归 gardener 待测的一条**——~~跨目录 / 跨项目 `--resume` 的 lookup 行为~~——**已由 [ADR-0007](./0007-agenttui-delivery-contract-pluggable-adapter.md) 2026-07-29 Amendment 的 D 项回填**。此处同步结项，免得读者在本 ADR 里看到一条其实已经关掉的遗留。
+
+**结论（分 brand，不可合并表述）**：
+- `codex exec resume` —— **跨目录可行**。
+- `claude --resume`（含 `-p --resume`）—— **跨目录必失败**，须在**目标项目目录**内执行；否则报 `No conversation found` 且目标转录零增长。机制：它按**执行时的 cwd** 映射到 `~/.claude/projects/<munged-cwd>/` 下找 session 文件，cwd 不对就直接落空。
+
+**对通道① 的规范性影响**：
+1. **跨项目直投 Claude Code 会话前必须先切到 `spec.project.path`**（若该 session 是在 worktree 子目录中创建的，以其**创建目录**为准）。投递方不得假定「当前 cwd 可用」。
+2. **这条前置解释了早前一批「直投失败 / 对方没收到」的观测**——那些失败与「活 peer 能不能注入」无关，是 cwd 不匹配。Amendment 1 推翻保守条款是对的；本条补上真正的失败因，避免读者把两者混为一谈而退回保守规则。
+3. **通道① 仍无 per-send 送达证据**，故可作**手动**触达手段，但 **operational 自动投递不得默认回落到它**——见 ADR-0007 规则 6。
