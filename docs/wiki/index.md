@@ -5,3 +5,4 @@
 | 页面 | 内容 |
 |---|---|
 | [AgentTUI 生命周期与状态机](./agenttui-lifecycle-and-states.md) | 状态集(声明态/保留枚举/有效态)+ 生命周期时间线逐节点走查 + 派生规则 + 设计理由 |
+| [安全启动 AgentTUI + brand-capacity observer](./agenttui-launch-and-brand-capacity.md) | 启动走查(new-tab 清父身份 → resolve 稳定 pane → 定向 bootstrap → 自登记 brand)+ 容量 source/freshness 诚实模型 + `/usage` collector 采信门 + recommend 决策流 |
