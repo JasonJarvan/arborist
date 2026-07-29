@@ -145,6 +145,7 @@ overlay/work_context-templates/ # sendbox (toAgent/toHuman) + Dashboard scaffold
 overlay/workflow-customization.md  # the workflow.md customization block
 scripts/                        # brand-compat installer + validator
 skills/arborist-sync/              # bidirectional overlay sync (de-privatize + conflict mediation)
+skills/arborist-relocate-project/  # safe project rename: registries + chat-history coordination
 INSTALL.md · adopt.sh · ADOPT.md   # install prompt + one-shot adopt + guide
 ```
 

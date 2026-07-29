@@ -46,9 +46,15 @@ Contributions that make that discipline sharper, more general, or easier to adop
 
 ### Adopt / sync tooling
 
-- `adopt.sh`, `INSTALL.md`, `ADOPT.md`, and the [`arborist-sync`](./skills/arborist-sync/SKILL.md) skill
-  govern how an instance repo picks up and syncs the overlay. Keep the placeholder-integrity and
-  privacy gates intact — they are what keep the template repo generic.
+- `adopt.sh`, `INSTALL.md`, `ADOPT.md`, and [`arborist-sync`](./skills/arborist-sync/SKILL.md) govern
+  how an instance repo adopts and syncs the overlay. Keep the placeholder-integrity and privacy gates
+  intact — they are what keep the template repo generic and transcripts trustworthy.
+- [`arborist-relocate-project`](./skills/arborist-relocate-project/SKILL.md) renames or moves **an
+  adopting project** (not the overlay). Its mutation rules are load-bearing: substitutions must stay
+  anchored to whole path components and whole words, a value is rewritten only when it still holds
+  the old value, and every failure mode must be detected in preflight so a refusal writes nothing.
+  [`skills/arborist-relocate-project/tests/`](./skills/arborist-relocate-project/tests/) is the
+  regression witness for those rules — extend it with any gate you add.
 
 ### Fixing links / consistency
 

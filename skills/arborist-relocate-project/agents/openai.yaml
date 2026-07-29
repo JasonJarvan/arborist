@@ -1,0 +1,4 @@
+interface:
+  display_name: "Relocate Arborist Project"
+  short_description: "Safely rename an Arborist-managed project"
+  default_prompt: "Use $arborist-relocate-project to rename this Arborist-managed project and preserve its registries and chat history."

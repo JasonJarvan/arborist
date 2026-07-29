@@ -175,6 +175,7 @@ overlay/work_context-templates/ # sendbox（toAgent/toHuman）+ Dashboard 脚手
 overlay/workflow-customization.md # workflow.md 定制层
 scripts/                        # brand compatibility installer + validator
 skills/arborist-sync/              # 双向 overlay 同步（去隐私 + 冲突调解）
+skills/arborist-relocate-project/  # 安全改名：注册表 + 聊天历史协调迁移
 adopt.sh / ADOPT.md             # 一键 adopt + 说明
 ```
 
