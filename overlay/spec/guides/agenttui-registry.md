@@ -148,10 +148,12 @@
 | **路径推导** | 「我该往哪写？」 | 由脚本位置反推仓根（`__file__` 上溯 N 级那一族做法）**必须校验推导结果真是项目仓**——目标目录须含 `.trellis/` 或 `.git/`。推不出、或推出来的不是项目仓 ⇒ 拒绝；**绝不 `mkdir` 造一个假注册表**（`mkdir -p` 恰好会把错位置造得「像是本来就有」）。自登记时目标 `.arborist/` 不存在的处置**不在此复述**，见 §5 第 8 点（fail-closed 报 `half-registered`、不得静默上移父目录）。 | 非零退出 + 明确说出「推导出的路径不是项目仓」 |
 | **路由推导** | 「我投得进去吗？」 | 推不出可达路由即 fail-closed（规则 6）；pane 存在性用**会报错**的探针并**解析 stdout**（规则 5），禁用「对不存在 pane 静默返回空 + rc=0」的读屏类命令；**路由与传输必须分层**——preflight 与路由判据定义在「**本次路由所需能力**」这一抽象层上，**不得**把某个具体复用器的名字/命令硬编进路由判定（那样每换一次复用器都要改路由代码，而契约本该只换 adapter）。 | `no-operational-route` + 非零退出（**≠** `queued-unverified`）|
 
-- **⚠️ 两半均为 adapter 未实现**（截至 2026-07-30）：随发 `scripts/agenttui.py` 目前①按 `__file__` 上溯定位仓根、**不校验**结果是否为项目仓；②`build_route` 里**硬编**「复用器必须是 zellij，否则报错」，即把传输选择焊死在路由判定里，与本契约的分层要求及 [ADR-0007](./decisions/0007-agenttui-delivery-contract-pluggable-adapter.md) 的 transport 中立**直接冲突**；③无发送侧能力检查、无 `no-operational-route` 状态。规范先落、实现随后收敛，见下「随发 adapter 的契约缺口」。
+- **两半均已在随发 adapter 落地**（2026-07-30；此前为「规范已落、实现未收敛」）：`scripts/agenttui.py` ①推导出的仓根须含 `.trellis/` 或 `.git/`，否则非零退出拒绝（且**不创建**任何目录），可用 `--repo` 显式指定；②路由改为**能力层**判定——`build_route` 只问「这个 `pane_ref` 有无已注册 transport / 该 transport 可用吗 / 目标 pane 存在吗」，具体复用器命令收在 `PaneTransport` 子类里，复用器名→transport 的映射只在一处注册表；③有发送侧能力检查与 `no-operational-route`（非零退出）。**仍有未实现项**（规则 3 的双指纹/证据等级），逐条见下「随发 adapter 的契约缺口」。
 
 - **参考 adapter（随发 · opt-in · 二选一别混）**：
-  - `scripts/agenttui.py`（adopt 铺到 `<repo>/.trellis/scripts/`）是本契约的 **operational 参考实现**——按注册表 `pane_ref` 用 `zellij … write-chars --pane-id <目标 pane>` 寻址注入；调用见工具表条目 `agenttui-direct`（`python3 .trellis/scripts/agenttui.py {status|send|heartbeat|stop}`，发前可 `--dry-run` 验路由）。**operational 投递一律走它**（而非下面那个演示脚本）。**⚠️ 它当前并未满足契约全部条款**——缺口逐条列在下方「随发 adapter 的契约缺口」，别读成「已满足全部契约」。
+  - `scripts/agenttui.py`（adopt 铺到 `<repo>/.trellis/scripts/`）是本契约的 **operational 参考实现**——按注册表 `pane_ref` 经 **transport 抽象**寻址注入（随发只注册了 zellij 一个 transport，其 `write-chars --pane-id` 细节在该 transport 内部）；调用见工具表条目 `agenttui-direct`（`python3 .trellis/scripts/agenttui.py {status|send|heartbeat|stop}`，发前可 `--dry-run` 验路由——dry-run **不跑**存在性探针，因为探针会抢焦点）。**operational 投递一律走它**（而非下面那个演示脚本）。
+    - **调用方须知的两处行为**（按规则 6 落地，非默认兜底）：①目标无可达 pane 时**不再**自动改走 `claude -p --resume`——要走 resume 必须显式加 `--allow-resume`，否则报 `no-operational-route` 并**非零退出**；②`no-operational-route` 的结构化输出带 `reason` / `detail` / `remedy` / `sent=false` / `retry_safe=true`，与 `queued-unverified`（`sent=true` / `retry_safe=false`）**字面区分**——照它判断该不该重发。
+    - **⚠️ 它仍未满足契约全部条款**——剩余缺口逐条列在下方「随发 adapter 的契约缺口」，别读成「已满足全部契约」。
   - **`--pane-id` 寻址不免除聚焦（已据实更正）**：本段早前写作「**定向注入**（不靠焦点）」，**那是错的**。**实测**（一个 adopter 实例的 dogfood 巡检；上游 gardener 未独立复现）：`zellij action write-chars --pane-id <目标 pane>` **跨 tab 不生效**，跨 tab 投递必须先 `zellij action focus-pane-id <目标 pane>` 把焦点移过去。
     - **后果 = 一条已知架构局限**：投递因此会**抢焦点**，与「人类正在同一 zellij session 里操作（切 tab / 移焦点）」**结构性冲突**——人类的一次切 tab 就能让并发投递投错或被打断。本 guide **只记录该局限**，不承诺任何具体替代方案；终端复用器的选择**正在评估**（core 仍 transport 中立，见 [ADR-0007](./decisions/0007-agenttui-delivery-contract-pluggable-adapter.md) Amendment）。
     - 规避（当前唯一诚实建议）：跨 tab 投递期间避免人机同时操作同一 session；或把被投递的 AgentTUI 放在人类不手动切换的 session/tab 里。
@@ -163,14 +165,15 @@
     - 关联：`pane_ref.session` 会因 zellij session **改名**而腐烂——`ZELLIJ_SESSION_NAME` 是**启动时快照**、不回写已运行的进程，故据它推断的 `pane_ref.session` 改名后失效，并落进第一格**静默成功**（证据等级：**下游实测，上游未独立复现**）。规则 5 只管 pane 存在性、**不覆盖这一类**；改名或换复用器后 `pane_ref` 必须整条重建。
   - `scripts/agenttui_deliver_zellij.py` 是**契约的 seam 化演示，非 operational**：默认注入器**收 `pane_ref` 却不定向、只写当前焦点 pane**，跨 session / 跨 brand（目标 pane ≠ 焦点 pane）必投错——**未补 `--pane-id` 前不得当跨 pane operational 路**（下游把它误当正道，正是跨 brand 发信「表现不佳 / 不稳定」的根因）。
 - **⚠️ 随发 adapter 的契约缺口（截至 2026-07-30，必须可见——契约不得被读成「代码已做到」）**：随发 `scripts/agenttui.py` **尚未**实现下列契约条款，port 任务另行追踪；在它补齐前，调用方须自行承担对应风险：
-  - **规则 3 的 inode+size 双指纹与全文降级**：未实现——只记 size 作起始偏移，且当**现 size 小于该偏移**（= 文件被重写/截短）时**直接判未命中** ⇒ 目标做过 compact / 会话文件被重写时返回**假阴性** `queued-unverified`（重发风险，见规则 2）。
-  - **规则 3 的证据等级标注**：未实现——命中只记单一 `envelope-nonce-found`，不区分 `…-after-boundary` / `…-fullfile`，调用方读不出证据强度。
-  - **`--pane-id` 前置 `focus-pane-id` 聚焦**：未实现 ⇒ **跨 tab 投递会静默不生效**（字节没进目标 pane，也拿不到 nonce 证据）。
-  - **规则 5 的存在性 preflight（解析 stdout）**：未实现 ⇒ pane 已消失/换号时表现为「命令成功但无送达证据」；**session 存在而 pane 不存在**这一格更是 rc=0 + stdout 全空，事后无任何文本可依据。
-  - **规则 5 的「注入/提交命令也按 stdout 判定」**：未实现 —— 仍以命令退出码为主判据 ⇒ session 名腐烂（改名）或写错时**静默成功**。
-  - **规则 6 的发送侧能力检查 + `no-operational-route`**：未实现 —— 目前 claude-code 分支在 pane 路不可用时**静默回落** `claude -p --resume`（codex 分支已按契约明确拒绝），且没有与 `queued-unverified` 区分开的「没发出去」状态。
-  - **「投递前置校验」两半**：未实现 —— ①仓根按 `__file__` 上溯得出，**不校验**其是否真是项目仓；②`build_route` 硬编「复用器 == zellij」，路由与传输焊死，换复用器无法只换 adapter。
+  - **规则 3 的 inode+size 双指纹与全文降级**：**仍未实现**——只记 size 作起始偏移，且当**现 size 小于该偏移**（= 文件被重写/截短）时**直接判未命中** ⇒ 目标做过 compact / 会话文件被重写时返回**假阴性** `queued-unverified`（重发风险，见规则 2）。
+  - **规则 3 的证据等级标注**：**仍未实现**——命中只记单一 `envelope-nonce-found`，不区分 `…-after-boundary` / `…-fullfile`，调用方读不出证据强度。
   规范先于实现落定是**刻意**的（契约是判据、实现向它收敛）；但**凡未实现处必须像这样逐条标注**，不得笼统写成「参考 adapter 已满足上述契约」。
+- **✅ 已收敛的条目（2026-07-30 实现，本清单据实改写；留档以便对照上面那两条仍缺的）**——同时列出**实现带来的已知代价**，别读成「无副作用」：
+  - **规则 5 的存在性 preflight（解析 stdout）**：已实现——注入前用 `focus-pane-id` 探针并**按 stdout 文本**判 `Pane with id … not found` / `Session '…' not found`，**不看退出码**；探针失败即 `no-operational-route`、**零注入命令**。**禁用** `dump-screen -p`（对不存在 pane 静默返回空 + rc=0）作判据。
+  - **`--pane-id` 前置 `focus-pane-id` 聚焦**：已实现，且**与上一条是同一个命令**——存在性探针本身就是聚焦命令，故跨 tab 投递前焦点必然已移到目标 pane。**代价照旧**：投递**抢焦点**，与人类同 session 操作结构性冲突（上文「已知架构局限」，未消除）；`--dry-run` 因此**不跑**探针（也就不做该次校验），输出里如实标注。
+  - **规则 5 的「注入/提交命令也按 stdout 判定」**：已实现——注入与提交命令都按 stdout/stderr 文本判失败，退出码不作成功证据。**但最坏那格无解**：session 在、pane 不在时注入是 rc=0 + stdout 全空 ⇒ 代码**不得**据此判成功，判据只剩规则 3 的 nonce（提交命令被文本判失败时，因字节已发出，报 `queued-unverified` 而非 `no-operational-route`）。
+  - **规则 6 的发送侧能力检查 + `no-operational-route`**：已实现——只校验**本次路由用得到**的能力（走 pane 校验 transport 可用 + pane 存在；走 resume 才 `which` 对应 resume CLI），无可用 operational 路由 ⇒ `no-operational-route` + 非零退出；claude-code 分支**不再静默回落** resume（与 codex 分支同形拒绝），resume 须 `--allow-resume` 显式选择。
+  - **「投递前置校验」两半**：已实现——路径推导侧见上（仓根须含 `.trellis/` 或 `.git/`，拒绝时不创建任何目录）；路由推导侧改为能力层判定，具体复用器命令封在 transport 子类内、映射集中在一处注册表，故换复用器只加 transport、契约与路由代码不动。
 - **契约里的 nonce ≠ §5.2 自识别 nonce**（用途不同，勿混淆）：本节的 per-send nonce 是**送达证据**——证明「这一条信封确实进了对方 transcript」；§5.2（自登记步骤 2）的无桥接 nonce grep 是**自识别探针**——本会话往自己终端吐一个随机串、再回自己 brand 目录 grep 定位**自身** `session_id`/`session_file`。前者验对端送达、后者定位本端句柄，各自独立。
 - **证据是 per-send 运行时态，不入注册表**：字节边界 / nonce / marker 均随单次发送产生与消亡，注册表是静态发现表，**不**为其新增字段（`pane_ref` 只存寻址句柄，见 §2.2）。
 - **候选未来 transport（备注，非依赖）**：官方 **Channels** 能把外部事件推进一个已运行的 Claude Code 会话，是一个**候选未来投递 transport**（成熟后可作满足本契约的又一 adapter 后端）；但它当前仍是 **research preview**、且**需会话启动时显式 opt-in**，故**暂不作 Arborist 默认依赖**（与「可插拔 adapter、opt-in、transport 中立」一致）。
