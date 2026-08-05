@@ -327,14 +327,19 @@ class SilentInjectionTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.session_file = Path(self.temporary.name) / "target-session.jsonl"
         self.session_file.write_text("existing transcript line\n", encoding="utf-8")
-        self._attempts = AGENTTUI.PANE_VERIFY_ATTEMPTS
-        self._interval = AGENTTUI.PANE_VERIFY_INTERVAL_SECONDS
-        AGENTTUI.PANE_VERIFY_ATTEMPTS = 1
-        AGENTTUI.PANE_VERIFY_INTERVAL_SECONDS = 0.0
+        # Keep the suite fast: these cases are about outcome classification, not
+        # about how long verification is willing to wait.
+        self._window = AGENTTUI.PANE_VERIFY_WINDOW_SECONDS
+        self._queued_window = AGENTTUI.PANE_VERIFY_QUEUED_WINDOW_SECONDS
+        self._poll = AGENTTUI.PANE_VERIFY_POLL_INITIAL_SECONDS
+        AGENTTUI.PANE_VERIFY_WINDOW_SECONDS = 0.0
+        AGENTTUI.PANE_VERIFY_QUEUED_WINDOW_SECONDS = 0.0
+        AGENTTUI.PANE_VERIFY_POLL_INITIAL_SECONDS = 0.0
 
     def tearDown(self) -> None:
-        AGENTTUI.PANE_VERIFY_ATTEMPTS = self._attempts
-        AGENTTUI.PANE_VERIFY_INTERVAL_SECONDS = self._interval
+        AGENTTUI.PANE_VERIFY_WINDOW_SECONDS = self._window
+        AGENTTUI.PANE_VERIFY_QUEUED_WINDOW_SECONDS = self._queued_window
+        AGENTTUI.PANE_VERIFY_POLL_INITIAL_SECONDS = self._poll
 
     def run_pane_send(self, transport: FakeTransport, *, marker: str = "marker-absent"):
         route = AGENTTUI.DeliveryRoute(
@@ -740,6 +745,154 @@ class CapacityRepoDerivationGateTests(unittest.TestCase):
             self.assertEqual(repo.resolve() / CAPACITY.LOCK_RELATIVE_PATH, args.lock)
             # Validation alone must not have created the runtime tree.
             self.assertFalse((repo / ".arborist").exists())
+
+
+
+class VerificationWindowTests(unittest.TestCase):
+    """Shape 4: a verify window shorter than the target's flush.
+
+    The window used to be one second (10 attempts x 0.1s). Measured three times:
+    a delivered envelope's transcript record lands later than that, so the reading
+    came back `queued-unverified` for messages that had in fact arrived -- and the
+    false negative then drove a *second* submit key. These tests pin both halves:
+    a late flush must still read as delivered, and it must not press submit twice.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.session_file = Path(self.temporary.name) / "target-session.jsonl"
+        self.session_file.write_text("existing transcript line\n", encoding="utf-8")
+        self._real_contains = AGENTTUI.transcript_contains_marker
+        self.addCleanup(
+            setattr, AGENTTUI, "transcript_contains_marker", self._real_contains
+        )
+        self._poll = AGENTTUI.PANE_VERIFY_POLL_INITIAL_SECONDS
+        self._window = AGENTTUI.PANE_VERIFY_WINDOW_SECONDS
+        AGENTTUI.PANE_VERIFY_POLL_INITIAL_SECONDS = 0.0
+        AGENTTUI.PANE_VERIFY_WINDOW_SECONDS = 5.0
+
+        def restore() -> None:
+            AGENTTUI.PANE_VERIFY_POLL_INITIAL_SECONDS = self._poll
+            AGENTTUI.PANE_VERIFY_WINDOW_SECONDS = self._window
+
+        self.addCleanup(restore)
+
+    def appears_on_call(self, nth: int) -> list[int]:
+        """Make the marker surface only on the nth transcript check."""
+        calls: list[int] = []
+
+        def fake(path, marker, start_offset):
+            calls.append(1)
+            return len(calls) >= nth
+
+        AGENTTUI.transcript_contains_marker = fake
+        return calls
+
+    def send(self, *, brand: str = "claude-code", state: str = "idle"):
+        transport = FakeTransport()
+        route = AGENTTUI.DeliveryRoute(
+            mode=AGENTTUI.ROUTE_PANE,
+            cwd=Path(self.temporary.name),
+            transport=transport,
+            pane_ref=pane_ref(),
+            pane_text="envelope body",
+            submit_byte=AGENTTUI.PANE_ENTER_BYTE,
+        )
+        payload = {
+            "target": TARGET,
+            "target_brand": brand,
+            "target_effective_state": state,
+            "target_session_file": str(self.session_file),
+            "delivery_marker": f"from={SENDER} nonce={NONCE}",
+            "nonce": NONCE,
+        }
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(
+            io.StringIO()
+        ):
+            AGENTTUI.send_via_pane(route, payload, timeout=None, submit_delay=0.0)
+        result = json.loads(stdout.getvalue().strip().splitlines()[-1])
+        return transport, result
+
+    def test_late_flush_reads_as_delivered(self) -> None:
+        calls = self.appears_on_call(3)
+
+        _transport, result = self.send()
+
+        self.assertEqual(AGENTTUI.DELIVERY_DELIVERED, result["delivery"])
+        self.assertEqual("envelope-nonce-found", result["evidence"])
+        self.assertGreaterEqual(len(calls), 3)
+
+    def test_late_flush_never_presses_submit_twice(self) -> None:
+        # The regression that mattered: the 1s window's false negative made the
+        # retry branch fire, so a delivered envelope got a second submit key.
+        self.appears_on_call(3)
+
+        transport, result = self.send()
+
+        self.assertEqual(AGENTTUI.DELIVERY_DELIVERED, result["delivery"])
+        self.assertEqual(1, len(transport.keys))
+
+    def test_active_codex_is_not_resent_and_stays_queued(self) -> None:
+        # Tab already enqueued the envelope; the nonce cannot appear before the
+        # turn ends, so this must neither wait it out nor press a second key.
+        AGENTTUI.transcript_contains_marker = lambda *args, **kwargs: False
+        AGENTTUI.PANE_VERIFY_QUEUED_WINDOW_SECONDS = 0.0
+        self.addCleanup(
+            setattr, AGENTTUI, "PANE_VERIFY_QUEUED_WINDOW_SECONDS", 1.0
+        )
+
+        transport, result = self.send(brand="codex", state="active")
+
+        self.assertEqual(AGENTTUI.DELIVERY_QUEUED_UNVERIFIED, result["delivery"])
+        self.assertEqual(1, len(transport.keys))
+
+    def test_window_is_expressed_in_seconds_and_stays_wide(self) -> None:
+        # Direction, not just the number: early exit means widening is free,
+        # while narrowing turns delivered into unverified and provokes a
+        # duplicate submit. Widening is fail-safe; narrowing is fail-dangerous.
+        self.assertFalse(hasattr(AGENTTUI, "PANE_VERIFY_ATTEMPTS"))
+        self.assertGreaterEqual(self._window, 15.0)
+        self.assertLess(
+            AGENTTUI.PANE_VERIFY_QUEUED_WINDOW_SECONDS, self._window
+        )
+
+    def test_zero_window_still_checks_once(self) -> None:
+        calls = self.appears_on_call(1)
+
+        found = AGENTTUI.wait_for_transcript_marker(
+            self.session_file, "marker", 0, 0.0
+        )
+
+        self.assertTrue(found)
+        self.assertEqual(1, len(calls))
+
+    def test_window_bounds_the_wait_with_an_injected_clock(self) -> None:
+        AGENTTUI.transcript_contains_marker = lambda *args, **kwargs: False
+        # A fake clock only advances through the injected sleep, so this case
+        # needs a real poll interval; setUp zeroes it for the fast cases.
+        AGENTTUI.PANE_VERIFY_POLL_INITIAL_SECONDS = 0.1
+        now = [0.0]
+        slept: list[float] = []
+
+        def sleep(seconds: float) -> None:
+            slept.append(seconds)
+            now[0] += seconds
+
+        found = AGENTTUI.wait_for_transcript_marker(
+            self.session_file,
+            "marker",
+            0,
+            2.0,
+            monotonic=lambda: now[0],
+            sleep=sleep,
+        )
+
+        self.assertFalse(found)
+        self.assertAlmostEqual(2.0, sum(slept), places=6)
+        # Backoff, not a busy loop.
+        self.assertLess(len(slept), 20)
 
 
 if __name__ == "__main__":

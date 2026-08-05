@@ -26,8 +26,28 @@ CODEX_PANE_SUBMIT_DELAY_SECONDS = 1.0
 # Codex's busy-TUI queue shortcut is Tab; Enter steers the current turn.
 CODEX_PANE_QUEUE_BYTE = "9"
 PANE_ENTER_BYTE = "13"
-PANE_VERIFY_ATTEMPTS = 10
-PANE_VERIFY_INTERVAL_SECONDS = 0.1
+# Delivery-verification window, expressed in SECONDS on purpose. The previous
+# form (attempts x interval = 10 x 0.1) hid the total behind a multiplication,
+# which is exactly why nobody noticed the window was one second. Measured three
+# independent times: a claude-code target's `type=user` record lands in well
+# under five seconds, so a one-second window reported *delivered* messages as
+# unverified -- and that false negative then drove the retry branch in
+# send_via_pane to press submit a second time.
+#
+# The direction matters more than the number. Verification exits early on the
+# first hit, so the success path pays nothing extra and widening is nearly free;
+# narrowing turns a delivered message into "unverified" and provokes a duplicate
+# submit. Widening is fail-safe, narrowing is fail-dangerous. Do not shrink
+# these to make `send` return sooner. See agenttui-registry.md section 3, shape
+# 4 ("verification window shorter than the target's flush").
+PANE_VERIFY_WINDOW_SECONDS = 20.0
+# An active Codex pane was handed Tab, so the envelope is queued and its nonce
+# cannot appear before the current turn ends. Waiting out the full window buys
+# nothing there, and `queued-for-next-turn` is the contractually expected
+# reading -- so that tier stays deliberately short.
+PANE_VERIFY_QUEUED_WINDOW_SECONDS = 1.0
+PANE_VERIFY_POLL_INITIAL_SECONDS = 0.1
+PANE_VERIFY_POLL_MAX_SECONDS = 1.0
 NONCE_PATTERN = re.compile(r"[A-Za-z0-9._:-]+")
 
 # A derived repository root is only usable if it really is a project repository.
@@ -142,11 +162,12 @@ class Capability(NamedTuple):
 class CommandOutcome(NamedTuple):
     """Result of one transport command.
 
-    ``rejected`` is decided by *stdout text*, never by ``returncode``: multiplexers
-    are observed to exit 0 while only saying "not found" on stdout. And note the
-    worst case that no post-hoc parsing can rescue — a live session with a dead
-    pane answers rc=0 with *empty* stdout — so a clean outcome here is **not**
-    delivery evidence (rule 3's nonce is).
+    ``rejected`` is decided by *stdout and stderr joined*, never by ``returncode``:
+    multiplexers are observed to exit 0 for a missing session and for a missing
+    pane, with the "not found" diagnostic on stderr while stdout carries ordinary
+    content. And note the worst case that no post-hoc parsing can rescue — a live
+    session with a dead pane answers rc=0 with *both streams empty* — so a clean
+    outcome here is **not** delivery evidence (rule 3's nonce is).
     """
 
     argv: list[str]
@@ -495,7 +516,13 @@ class ZellijTransport(PaneTransport):
             )
         stdout = completed.stdout or ""
         stderr = completed.stderr or ""
-        # Judged by text, not by returncode (rc is 0 even for "not found").
+        # Judged by the two streams joined, never by the return code. Measured
+        # on one multiplexer version: injection and submit commands return 0 for
+        # a missing session *and* for a missing pane, and the diagnostic lands on
+        # stderr while stdout may carry ordinary content (a session list). The
+        # probe does return non-zero for a missing pane, but a conflicting report
+        # exists for the already-focused case, so a non-zero code is not used as a
+        # rejection signal either -- see agenttui-registry.md section 3.
         text = f"{stdout}\n{stderr}"
         for pattern in ZELLIJ_NOT_FOUND_PATTERNS:
             match = pattern.search(text)
@@ -525,7 +552,10 @@ class ZellijTransport(PaneTransport):
         )
 
     def exists(self, pane_ref: dict[str, str]) -> Capability:
-        """Existence preflight via ``focus-pane-id`` — judged by stdout text.
+        """Existence preflight via ``focus-pane-id`` — judged by joined output.
+
+        The verdict comes from stdout and stderr together: the "not found"
+        diagnostic was measured on stderr, so reading stdout alone would miss it.
 
         ``dump-screen -p`` is deliberately NOT used: it returns empty output with
         exit status 0 for a pane that does not exist, i.e. it manufactures false
@@ -1028,12 +1058,28 @@ def wait_for_transcript_marker(
     path: Path,
     marker: str,
     start_offset: int,
+    window_seconds: float = PANE_VERIFY_WINDOW_SECONDS,
+    *,
+    monotonic=time.monotonic,
+    sleep=time.sleep,
 ) -> bool:
-    for _ in range(PANE_VERIFY_ATTEMPTS):
+    """Poll the target transcript until the marker appears or the window ends.
+
+    Exits on the first hit, so a wide window costs the success path nothing.
+    Always checks at least once, even for a zero window. A zero poll interval
+    degenerates to a busy poll bounded by the window; the clock seams exist so
+    tests can bound both without real waiting.
+    """
+    deadline = monotonic() + max(0.0, window_seconds)
+    delay = PANE_VERIFY_POLL_INITIAL_SECONDS
+    while True:
         if transcript_contains_marker(path, marker, start_offset):
             return True
-        time.sleep(PANE_VERIFY_INTERVAL_SECONDS)
-    return False
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return False
+        sleep(min(delay, PANE_VERIFY_POLL_MAX_SECONDS, remaining))
+        delay = min(delay * 2, PANE_VERIFY_POLL_MAX_SECONDS)
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -1184,17 +1230,25 @@ def send_via_pane(
             # sent"; it is a send whose delivery cannot be proven.
             submit_rejection = submitted.detail
         else:
-            delivered = wait_for_transcript_marker(
-                session_file, payload["delivery_marker"], boundary
-            )
             # Rule 2: an enqueue key must never be resent (it would enqueue a
-            # duplicate envelope). Only a plain submit may be retried.
+            # duplicate envelope). Only a plain submit may be retried. This is
+            # derived *before* verification because it also selects the window:
+            # a queued envelope cannot surface until the turn ends, so waiting
+            # out the full window would be pure idling.
             enqueued_for_next_turn = (
                 payload["target_brand"] == "codex"
                 and payload["target_effective_state"] == "active"
             )
+            verify_window = (
+                PANE_VERIFY_QUEUED_WINDOW_SECONDS
+                if enqueued_for_next_turn
+                else PANE_VERIFY_WINDOW_SECONDS
+            )
+            delivered = wait_for_transcript_marker(
+                session_file, payload["delivery_marker"], boundary, verify_window
+            )
             if not delivered and not enqueued_for_next_turn:
-                time.sleep(max(submit_delay, PANE_VERIFY_INTERVAL_SECONDS))
+                time.sleep(max(submit_delay, PANE_VERIFY_POLL_INITIAL_SECONDS))
                 submitted = transport.send_key(
                     route.pane_ref, route.submit_byte, cwd=route.cwd, timeout=timeout
                 )
@@ -1203,7 +1257,10 @@ def send_via_pane(
                     submit_rejection = submitted.detail
                 else:
                     delivered = wait_for_transcript_marker(
-                        session_file, payload["delivery_marker"], boundary
+                        session_file,
+                        payload["delivery_marker"],
+                        boundary,
+                        verify_window,
                     )
     except subprocess.TimeoutExpired as exc:
         raise RegistryError(
