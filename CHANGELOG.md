@@ -6,6 +6,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
 ## [Unreleased]
 
 ### Added
+- **Focus-theft counter, derived from a probe answer the adapter already had** (`agenttui.py`
+  `addressing_intrusion` + `INTRUSION_*`, `agenttui-registry.md` §3, +6 tests) — the intrusiveness of
+  pane-addressed delivery (the probe *is* the focus command) was recorded as an architectural cost with no
+  measurement behind it, and the plan was to settle it with an experiment needing a human present. But
+  rc=0 from the probe means the focus *actually moved* and rc=2 "already focused" means nobody was
+  disturbed, so the existing preflight already answers, per delivery, whether that delivery stole
+  someone's view. Delivery results now carry `addressing_intrusion`, giving the **rate** with no new
+  experiment, no human present, and nothing interrupted. An unreachable pane records **no value** rather
+  than "none" (nothing was delivered; counting it would pad the denominator and understate the real rate),
+  and an unfamiliar non-zero answer records `unknown` rather than being assumed harmless. This answers the
+  half that should be known first — how often focus theft happens, i.e. whether the cost justifies
+  changing transports — and explicitly not the other half (whether another transport avoids it), which
+  still needs the in-person experiment.
 - **AgentTUI registry consistency gate** (`overlay/scripts/validate_agenttui_registry.py` + 37 tests,
   `agenttui-registry.md` §2.2.1/§2.3/§3/§4, `verification-and-gates.md` gate matrix, adopt-wired) —
   the guide already specified both `half-registered` directions and had **no enforcer at all**, which by
@@ -190,6 +203,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   rather than re-delegating; ADR-0004 Residual tightened.
 
 ### Fixed
+- **A safety claim shipped one commit earlier was wrong** (`agenttui-registry.md` §3) — the previous entry
+  justified measuring the already-focused case with "probing the pane you occupy steals nobody's focus".
+  That reasoning conflates *the process runs in this pane* with *this pane is the client's focus*; *process
+  location is not client focus*. The measurement happened to disturb nobody only because it happened to
+  return rc=2; had it returned rc=0, the command would have pulled the client's view to that pane. The
+  correct statement is: **it cannot be guaranteed in advance, and the return code says afterwards whether
+  it happened** — which is exactly what made the focus-theft counter above possible.
 - **The probe's non-zero return code was recorded as an unresolved contradiction; it is now measured**
   (`agenttui-registry.md` §3, `agenttui.py` comments, +5 tests) — two independent reports disagreed about
   what the existence probe answers for an *already-focused* pane (rc=0 + empty vs rc=2 + "already

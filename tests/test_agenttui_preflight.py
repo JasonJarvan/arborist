@@ -942,5 +942,66 @@ class ProbeReturnCodeTests(unittest.TestCase):
         self.assertNotIn("focused", joined)
 
 
+
+class FocusIntrusionCounterTests(unittest.TestCase):
+    """The probe's own answer says whether this delivery stole someone's focus.
+
+    rc=0 means the focus actually moved (a human watching another pane lost their
+    view); rc=2 with "already focused" means the target was already there and
+    nobody was disturbed. Recording it per delivery turns an architectural cost
+    into a measurable rate -- the denominator for whether that cost justifies
+    changing transports -- with no new experiment and no interruption.
+    """
+
+    def transport(self, returncode: int, stderr: str, stdout: str = ""):
+        runner = RecordingRunner([FakeCompleted(returncode, stdout, stderr)])
+        return AGENTTUI.ZellijTransport(runner=runner, which=lambda _n: "/x/zellij")
+
+    def test_moved_focus_is_recorded_as_intrusive(self) -> None:
+        transport = self.transport(0, "")
+
+        capability = transport.exists(pane_ref("zellij"))
+
+        self.assertTrue(capability.ok)
+        self.assertEqual(
+            AGENTTUI.INTRUSION_FOCUS_MOVED, transport.addressing_intrusion()
+        )
+        self.assertIn("lost their view", capability.detail)
+
+    def test_already_focused_is_recorded_as_non_intrusive(self) -> None:
+        transport = self.transport(2, "Pane Terminal(6) is already focused")
+
+        capability = transport.exists(pane_ref("zellij"))
+
+        self.assertTrue(capability.ok)
+        self.assertEqual(AGENTTUI.INTRUSION_NONE, transport.addressing_intrusion())
+
+    def test_unreachable_pane_reports_no_intrusion_value_at_all(self) -> None:
+        # Not "none": nothing was delivered, so counting it as an undisturbed
+        # delivery would pad the denominator and understate the real rate.
+        transport = self.transport(2, "Pane with id Terminal(9999) not found")
+
+        capability = transport.exists(pane_ref("zellij"))
+
+        self.assertFalse(capability.ok)
+        self.assertIsNone(transport.addressing_intrusion())
+
+    def test_unexpected_nonzero_answer_is_unknown_not_assumed_harmless(self) -> None:
+        transport = self.transport(3, "some unfamiliar diagnostic")
+
+        transport.exists(pane_ref("zellij"))
+
+        self.assertEqual(AGENTTUI.INTRUSION_UNKNOWN, transport.addressing_intrusion())
+
+    def test_before_any_probe_the_answer_is_unknown_by_absence(self) -> None:
+        transport = self.transport(0, "")
+
+        self.assertIsNone(transport.addressing_intrusion())
+
+    def test_the_abstract_transport_refuses_to_guess(self) -> None:
+        # A transport that cannot tell must return None, never "none".
+        self.assertIsNone(AGENTTUI.PaneTransport().addressing_intrusion())
+
+
 if __name__ == "__main__":
     unittest.main()
