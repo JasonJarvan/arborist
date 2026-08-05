@@ -72,6 +72,36 @@ INTRUSION_FOCUS_MOVED = "focus-moved"
 INTRUSION_NONE = "already-focused"
 INTRUSION_UNKNOWN = "unknown"
 
+# Focus-intrusion observations are appended here, one JSON object per pane
+# delivery. Global rather than per-project on purpose: panes belong to the
+# multiplexer, so folding bursts across projects requires one file.
+#
+# EVENTS ONLY -- this log deliberately stores no ratios and no counters, and
+# nothing in this script computes an intrusion *rate*. Two measured reasons:
+#
+#   1. The measurement changes the measured quantity. The probe *is* the focus
+#      command, so once one delivery pulls a pane into focus, every immediately
+#      following delivery to that same pane reads "already focused" -- even
+#      though the first one really did interrupt someone. A ratio therefore looks
+#      *cleanest* exactly in the burst traffic that disturbs a human most. Only
+#      absolute event counts, folded by an analyzer that can see the gaps between
+#      them, mean anything.
+#   2. Aggregation hides the stratification that carries the whole question. The
+#      harm depends on where the human actually is: a delivery inside the session
+#      and tab they are watching is a different event from one to a pane nobody is
+#      looking at, and averaging the two answers neither "how common" nor "how
+#      bad". Each record therefore carries its own stratification fields and the
+#      folding is left to analysis time.
+OBSERVATION_LOG_DEFAULT = Path.home() / ".arborist" / "focus-intrusion.jsonl"
+
+# Capturing the active tab around the probe costs one extra read-only command, so
+# it runs only when an observation is actually going to be recorded (see
+# PaneTransport.observe_addressing). That is not just frugality: an unconditional
+# extra command would change the command sequence every caller sees, which is
+# itself the "measurement perturbs the measured system" failure this facility
+# exists to keep honest. It is per-transport state rather than a module global for
+# the same reason -- a global would leak the perturbation across callers.
+
 ROUTE_PANE = "pane"
 ROUTE_RESUME = "resume"
 
@@ -201,6 +231,12 @@ class PaneTransport:
 
     name = "abstract"
 
+    #: Opt-in: capture the extra stratification readings around the existence
+    #: probe. Off by default so that callers who are not recording observations
+    #: see exactly the command sequence they would have seen without this
+    #: facility -- the measurement must not perturb non-measuring callers.
+    observe_addressing = False
+
     def available(self) -> Capability:
         """Is this transport's own tooling usable at all in this process?"""
         raise NotImplementedError
@@ -233,6 +269,16 @@ class PaneTransport:
         tell (never guess: an unknown must not be counted as "did not disturb").
         """
         return None
+
+    def addressing_observation(self) -> dict[str, Any]:
+        """Stratification facts about the last probe that this transport can attest.
+
+        Never a summary and never a rate: a rate computed here would be wrong for
+        two measured reasons (see OBSERVATION_LOG_DEFAULT). Unknown facts must be
+        reported as ``None`` rather than omitted or guessed -- an absent field
+        reads as "nothing happened", which is the failure mode being avoided.
+        """
+        return {}
 
     def write_chars_argv(self, pane_ref: dict[str, str], text: str) -> list[str]:
         raise NotImplementedError
@@ -467,6 +513,10 @@ def build_envelope(
 # the only trustworthy signal — for the probe *and* for the injection and submit
 # commands themselves. Kept narrow on purpose: a loose "not found" would let
 # unrelated output masquerade as an addressing failure.
+# Real tabs in a dumped layout carry a name; the swap-layout templates below them
+# do not, which is what keeps this from matching a template.
+ZELLIJ_FOCUSED_TAB_PATTERN = re.compile(r'tab name="([^"]+)"[^\n]*focus=true')
+
 # Not an error: the probe says this when the target pane was already the focus.
 # It shares rc=2 with "not found" but means the opposite, so it lives apart from
 # the rejection patterns and is read as "nobody was disturbed".
@@ -498,6 +548,7 @@ class ZellijTransport(PaneTransport):
         self._runner = runner
         self._which = which
         self._last_intrusion: str | None = None
+        self._last_observation: dict[str, Any] = {}
 
     def _action_argv(self, pane_ref: dict[str, str], *action: str) -> list[str]:
         return [
@@ -603,8 +654,28 @@ class ZellijTransport(PaneTransport):
         cross-tab injection work at all, and it is why delivery structurally
         conflicts with a human driving the same multiplexer session.
         """
+        session = pane_ref["session"]
+        observing = self.observe_addressing
+        tab_before = self._active_tab(session) if observing else None
         outcome = self._run(self.probe_argv(pane_ref), cwd=None, timeout=None)
         self._last_intrusion = self._classify_intrusion(outcome)
+        tab_after = self._active_tab(session) if observing else None
+        own_session = self._own_session()
+        self._last_observation = {
+            "active_tab_before": tab_before,
+            "active_tab_after": tab_after,
+            # The strongest disturbance: the human's whole view changed tabs.
+            # None (not False) when either reading is unknown -- a missing
+            # reading must not be reported as "no switch happened".
+            "tab_switched": (
+                None
+                if tab_before is None or tab_after is None
+                else tab_before != tab_after
+            ),
+            "same_multiplexer_session": (
+                None if own_session is None else own_session == session
+            ),
+        }
         if outcome.rejected:
             return Capability(
                 False,
@@ -624,6 +695,29 @@ class ZellijTransport(PaneTransport):
             ),
         )
 
+    def _active_tab(self, session: str) -> str | None:
+        """Name of the currently focused tab, or None if it cannot be read.
+
+        Read-only and best-effort: this is measurement, so it must never be able
+        to fail a delivery. Any problem yields None, which analysis reads as
+        "unknown" rather than "unchanged".
+        """
+        try:
+            outcome = self._run(
+                [self.executable, "--session", session, "action", "dump-layout"],
+                cwd=None,
+                timeout=None,
+            )
+        except Exception:  # measurement must not break delivery
+            return None
+        if outcome.returncode != 0:
+            return None
+        match = ZELLIJ_FOCUSED_TAB_PATTERN.search(outcome.stdout)
+        return match.group(1) if match is not None else None
+
+    def _own_session(self) -> str | None:
+        return os.environ.get("ZELLIJ_SESSION_NAME") or None
+
     def _classify_intrusion(self, outcome: CommandOutcome) -> str | None:
         if outcome.rejected:
             # Nothing was delivered and nothing moved; the intrusion question
@@ -637,6 +731,9 @@ class ZellijTransport(PaneTransport):
 
     def addressing_intrusion(self) -> str | None:
         return self._last_intrusion
+
+    def addressing_observation(self) -> dict[str, Any]:
+        return dict(self._last_observation)
 
     def write_chars(
         self,
@@ -689,6 +786,7 @@ def build_pane_route(
     *,
     transports: dict[str, Callable[[], PaneTransport]] | None = None,
     preflight: bool = True,
+    observe_addressing: bool = False,
 ) -> DeliveryRoute:
     """Route to a live pane using only capability questions.
 
@@ -730,6 +828,7 @@ def build_pane_route(
                 "explicitly with --allow-resume"
             ),
         )
+    transport.observe_addressing = observe_addressing
     probe: Capability | None = None
     if preflight:
         probe = transport.exists(pane_ref)
@@ -836,6 +935,7 @@ def build_route(
     transports: dict[str, Callable[[], PaneTransport]] | None = None,
     allow_resume: bool = False,
     preflight: bool = True,
+    observe_addressing: bool = False,
     which: Callable[[str], str | None] = shutil.which,
 ) -> DeliveryRoute:
     """Pick a route from capabilities alone, or fail closed.
@@ -848,7 +948,11 @@ def build_route(
     if target.pane_ref is not None and target.state in {"active", "idle"}:
         try:
             return build_pane_route(
-                target, envelope, transports=transports, preflight=preflight
+                target,
+                envelope,
+                transports=transports,
+                preflight=preflight,
+                observe_addressing=observe_addressing,
             )
         except NoOperationalRoute as pane_failure:
             if not allow_resume:
@@ -948,6 +1052,7 @@ def plan_delivery(
     transports: dict[str, Callable[[], PaneTransport]] | None = None,
     allow_resume: bool = False,
     preflight: bool = True,
+    observe_addressing: bool = False,
     which: Callable[[str], str | None] = shutil.which,
 ) -> DeliveryPlan:
     sender = load_agent(repo, sender_name)
@@ -965,6 +1070,7 @@ def plan_delivery(
         transports=transports,
         allow_resume=allow_resume,
         preflight=preflight,
+        observe_addressing=observe_addressing,
         which=which,
     )
     payload = {
@@ -1165,6 +1271,22 @@ def create_parser() -> argparse.ArgumentParser:
     send.add_argument("--message", required=True)
     send.add_argument("--timeout", type=float, default=120.0)
     send.add_argument(
+        "--observation-log",
+        type=Path,
+        default=OBSERVATION_LOG_DEFAULT,
+        help=(
+            "append one focus-intrusion event per pane delivery here "
+            "(events only, never rates; see the module docstring)"
+        ),
+    )
+    send.add_argument(
+        "--no-observation-log",
+        dest="observation_log",
+        action="store_const",
+        const=None,
+        help="do not record the focus-intrusion event for this delivery",
+    )
+    send.add_argument(
         "--pane-submit-delay",
         type=float,
         default=None,
@@ -1234,12 +1356,37 @@ def echo_transport_output(outcome: CommandOutcome) -> None:
         )
 
 
+def append_observation(record: dict[str, Any], log_path: Path | None) -> None:
+    """Append one focus-intrusion event. Never allowed to fail a delivery.
+
+    One line per event, appended: no read-modify-write, so concurrent senders
+    cannot lose each other's records. Failures are reported and swallowed --
+    losing a measurement must never cost a message.
+    """
+    if log_path is None:
+        return
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        existed = log_path.exists()
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        if not existed:
+            os.chmod(log_path, 0o600)
+    except OSError as exc:
+        print(
+            f"warning: could not record the focus-intrusion observation "
+            f"({exc}); the delivery itself is unaffected",
+            file=sys.stderr,
+        )
+
+
 def send_via_pane(
     route: DeliveryRoute,
     payload: dict[str, Any],
     *,
     timeout: float | None,
     submit_delay: float | None,
+    observation_log: Path | None = None,
 ) -> int:
     """Inject into a live pane, then judge delivery only by the rule 3 nonce.
 
@@ -1344,31 +1491,37 @@ def send_via_pane(
             "an explicit peer reply",
             file=sys.stderr,
         )
-    print(
-        json.dumps(
-            {
-                "delivery": (
-                    DELIVERY_DELIVERED if delivered else DELIVERY_QUEUED_UNVERIFIED
-                ),
-                "route_mode": ROUTE_PANE,
-                "pane_transport": transport.name,
-                # Measured focus cost of *this* delivery (see INTRUSION_*). It is
-                # reported even on success because the point is the rate, not the
-                # incident: this field is the denominator for deciding whether
-                # focus theft is frequent enough to justify changing transports.
-                "addressing_intrusion": transport.addressing_intrusion(),
-                "target": payload["target"],
-                "target_brand": payload["target_brand"],
-                "nonce": payload["nonce"],
-                "evidence": "envelope-nonce-found" if delivered else "none",
-                "sent": True,
-                "retry_safe": False,
-                "transport_exit_status_trusted": False,
-                "submit_rejected": submit_rejection,
-                "acknowledged": False,
-            },
-            ensure_ascii=False,
-        )
+    result = {
+        "delivery": DELIVERY_DELIVERED if delivered else DELIVERY_QUEUED_UNVERIFIED,
+        "route_mode": ROUTE_PANE,
+        "pane_transport": transport.name,
+        # Measured focus cost of *this* delivery (see INTRUSION_*), reported on
+        # success too: the question is a rate, not an incident. Deliberately an
+        # event, never a summary -- see OBSERVATION_LOG_DEFAULT for why a ratio
+        # computed here would be systematically wrong.
+        "addressing_intrusion": transport.addressing_intrusion(),
+        "addressing_observation": transport.addressing_observation(),
+        "target": payload["target"],
+        "target_brand": payload["target_brand"],
+        "nonce": payload["nonce"],
+        "evidence": "envelope-nonce-found" if delivered else "none",
+        "sent": True,
+        "retry_safe": False,
+        "transport_exit_status_trusted": False,
+        "submit_rejected": submit_rejection,
+        "acknowledged": False,
+    }
+    print(json.dumps(result, ensure_ascii=False))
+    append_observation(
+        {
+            "observed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "nonce": payload["nonce"],
+            "delivery": result["delivery"],
+            "intrusion": transport.addressing_intrusion(),
+            "target_pane": dict(route.pane_ref),
+            **transport.addressing_observation(),
+        },
+        observation_log,
     )
     return 0
 
@@ -1428,6 +1581,10 @@ def command_send(args: argparse.Namespace, repo: Path) -> int:
         # The existence probe moves the terminal focus, so a dry run must not run
         # it; the payload says so instead of pretending the check happened.
         preflight=not args.dry_run,
+        # Extra readings only when they will actually be recorded.
+        observe_addressing=(
+            not args.dry_run and getattr(args, "observation_log", None) is not None
+        ),
     )
     payload, route = plan
     if args.dry_run:
@@ -1442,6 +1599,7 @@ def command_send(args: argparse.Namespace, repo: Path) -> int:
             payload,
             timeout=args.timeout,
             submit_delay=args.pane_submit_delay,
+            observation_log=getattr(args, "observation_log", None),
         )
     return send_via_resume(route, payload, timeout=args.timeout)
 

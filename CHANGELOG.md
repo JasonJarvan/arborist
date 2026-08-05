@@ -6,6 +6,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
 ## [Unreleased]
 
 ### Added
+- **Focus-intrusion observations are recorded as events with stratification, never as a rate**
+  (`agenttui.py` `append_observation` / `addressing_observation` / `--observation-log`,
+  `agenttui-registry.md` §3, +9 tests) — the counter added in the previous entry would have
+  **systematically understated** what it measures, in two ways that had to be fixed *before* collecting
+  data rather than after. First, the measurement changes the measured quantity: the probe *is* the focus
+  command, so once one delivery pulls a pane into focus, every following delivery to that same pane reads
+  "already focused" even though the first one really did interrupt someone — a ratio therefore looks
+  *cleanest* exactly in the burst traffic that disturbs a human most. Second, aggregation hides the
+  stratification that carries the question: a delivery into the session and tab a human is watching is a
+  different event from one to a pane nobody is looking at, and averaging them answers neither "how common"
+  nor "how bad". So each pane delivery now appends one event (timestamp, target pane, intrusion,
+  `same_multiplexer_session`, `active_tab_before`/`active_tab_after`, and `tab_switched` — the strongest
+  disturbance signal), folding is left to analysis, and a test pins that this script computes no rate at
+  all. Unknowns are recorded as `null`, never as "did not happen": an unreadable layout gives
+  `tab_switched: null` rather than `false`, an unreachable pane records no intrusion value rather than
+  "already-focused" (nothing was delivered; counting it would pad the denominator), and an unfamiliar
+  answer is `unknown`. The extra reading runs **only** when an observation will be recorded, because an
+  unconditional extra command would change the command sequence every caller sees — the same perturbation
+  problem one level up; a regression test pins the non-observing sequence. Known and recorded gap: the
+  layout dump exposes no pane-to-tab mapping, so "which tab holds the target" is unavailable and the
+  before/after active tab is used as a proxy.
 - **Focus-theft counter, derived from a probe answer the adapter already had** (`agenttui.py`
   `addressing_intrusion` + `INTRUSION_*`, `agenttui-registry.md` §3, +6 tests) — the intrusiveness of
   pane-addressed delivery (the probe *is* the focus command) was recorded as an architectural cost with no
