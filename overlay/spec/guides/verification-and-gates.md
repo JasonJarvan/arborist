@@ -11,6 +11,31 @@
 
 修一条「只靠自觉」的门，首选是**给它一个机械产物**（一个必须产出的落盘物、一个必答的 run-or-skip 记录），**而不是加一条更强的禁令**——更强的禁令同样只能靠自觉，一样会被静默跳过。把「做没做」从**不可审计**翻成**一眼可见**，才真正闭合了门。本篇下面的 **landing manifest** 与 **门控矩阵的「必答时刻」** 都是这条通则的实例；[「已知上游 Trellis 缺口」](#已知上游-trellis-缺口门存在但无执行者)一节则是这条测试**目前答不出**的几处（门写在纸上、执行者在 stock Trellis 里缺席）。
 
+### 有一类规则只能由事故生成，规范推导永远得不到它们
+
+与上一条并列的另一半认识论：**问「谁会注意到这条没被做」能补上执行者，却补不出一条你还不知道该写的规则。** 有一类约束的内容本身**只能来自一次真实故障**——它依赖某个具体工具在某个具体边界上的**反直觉行为**，而任何自洽的规范推导都得不出它，因为推导只会得出「工具应当如此」，而故障告诉你「它实际不是如此」。
+
+本仓已落规范里的这几条，**逐条都是实测得来**，没有一条是从规范推出来的：
+
+| 规则 | 反直觉在哪 | 若只靠推导会写成什么 |
+|---|---|---|
+| transcript 的 **compact 重写**会让按字节边界做的送达检测出**假阴性** | 「逐轮 append」看起来是个安全不变量 | 「记下偏移，之后的新增就是本次投递」 |
+| `--pane-id` 寻址**不免除聚焦**（跨 tab 须先聚焦） | 显式指定目标的参数看起来当然是定向的 | 「带 pane id 即定向注入，不靠焦点」 |
+| pane 不存在时注入命令 **rc=0 且 stdout 完全为空** | 失败的命令看起来当然会报错 | 「按退出码判断发送成功」 |
+| 默认沙箱**单向**阉割：会话能被投、发不出 | 隔离看起来对称 | 「沙箱要么通要么不通」 |
+| **认证失效**导致目标收了字节却不处理，transcript 永无痕迹 | 送到了看起来就等于会被处理 | 「字节进了目标就进了它的上下文」 |
+| 注册表 leaf **字段全对却落在仓的父目录**，从外面看不出错 | 内容自洽看起来就等于位置正确 | 「校验字段自洽即可」 |
+| **验证窗口比落盘还快**：送达其实成功，只因 grep 跑在目标落盘前而报「未验到」——这类假阴性会**抬高**失败率统计、污染真病因的样本集 | 验证器看起来是在观测，不是在参与 | 「验不到就是没送到」 |
+| **信封在离开发送方之前就已缺字**（构造侧的引用形式触发了 shell 替换），而投递、送达证据、所有门**全绿** | 全绿看起来就等于沟通成功 | 「有送达证据即说明消息到了」 |
+| **pane 会被顺序复用** ⇒ 朴素的「pane 引用全局唯一」会把正常残留报成冲突 | 唯一性约束看起来越严越好 | 「引用三元组全局唯一，违者即错」 |
+
+**推论（对流程的硬要求）**：
+- **事故复盘必须产出规范增量。** 一次故障的价值不在于把它修好——修好是当然的——而在于它带来了一条**推导不出的规则**。复盘不落规范，同形故障必定以新面貌复发（换个复用器、换个 brand、换条路径），而下一个人手里仍然只有那份推导得出来的、看起来很完整的规范。
+- **这类规则的证据等级天然是「实测」，不该被要求先有理论依据。** 要求「先解释清楚为什么工具会这样，再准许写进规范」等于把唯一的信息来源拒之门外：反直觉行为往往就是没有好理由的（实现细节、历史包袱、平台差异）。按 [claim provenance](./sendbox.md#done-信与验收证据的-claim-provenance-门) 的四列写清 **类别=实测 / 出处 / 未验证缺口**（含「未独立复现」）即可落规范；**缺理论解释是可接受的缺口，缺实测出处不是。**
+- **一个自带现成解释的错误读数，永远不会被追查。** 上表「**验证窗口比落盘还快**」那一条之所以能长期潜伏，不是因为没人看见那个「未验证」读数，而是因为它**有一个听起来合理的解释**（「目标正在忙、消息在排队」）——而那个解释**不可证伪**。**无法被解释的错误读数会被追查；能被解释的错误读数会被归档。** ⇒ 凡门给出「未通过 / 未验证」这类读数，其处置必须落在**可证伪的判据**上（一个能重跑的观测、一个能核对的产物、目标的实际行为），**不接受「大概是……」式叙述**作为结案；那不是诊断，是把一个待查读数关掉。
+- **由事故生成的规则同样要防假阳性。** 上表末行就是一次「按字面收紧」的教训：约束写得比现实更严（现实里 pane 会被顺序复用），门就会把正常情形报成违规——而**一个假阳性多的门会被人学会忽略，那比没有这个门更糟**（它还顺带稀释了旁边真有效的门，与本篇开头「装饰门稀释真门」同一机制）。故新增机械门时，除了「谁会注意到没做」，还要问一句**「它会在什么正常情形下误报，我怎么把那一格排除掉」**；排除的办法通常是把一条规则**按严重度拆成两条**（高危 fail、低危 warning），而不是放弃检查。
+- 归因只归到**形态**，不归到人或会话：本表每一行记的是「哪个边界上工具的行为出乎意料」，这才是可复用的部分。
+
 ### 共享资源与荣誉制记录必须有机械执行者
 
 同一族问题有三种常见形态；只写纪律都不够，必须把「遗漏」变成机器可见的失败：
@@ -25,7 +50,7 @@
 
 三条形态各自的机械执行者，就是本篇门控矩阵里对应的那几行：
 
-- **ADR 数字编号**走第一种保护——起草不占号、HITL accept 方统一分配，并由 `python3 .trellis/scripts/validate_adr_numbers.py --visibility <machine-local|product-git>` 按**四位数字前缀**校验（该 validator 的 `--visibility` **无默认值**，缺失或歧义即 fail closed）；它同时检查 proposed 起草阶段与编号后 accept 阶段的可见性。完整规则见 [`repomem-doc-boundary`](./repomem-doc-boundary.md#adr-文件名与编号分配共享命名空间硬规则)。pane ID、全局摘要 schema 与其它共享 registry key 服从同一条规则。
+- **ADR 数字编号**走第一种保护——起草不占号、HITL accept 方统一分配，并由 `python3 .trellis/scripts/validate_adr_numbers.py --visibility <machine-local|product-git>` 按**四位数字前缀**校验（该 validator 的 `--visibility` **无默认值**，缺失或歧义即 fail closed）；它同时检查 proposed 起草阶段与编号后 accept 阶段的可见性。完整规则见 [`repomem-doc-boundary`](./repomem-doc-boundary.md#adr-文件名与编号分配共享命名空间硬规则)。pane ID、全局摘要 schema 与其它共享 registry key 服从同一条规则，且已有自己的执行者：**AgentTUI 注册表**没有单一分配者（每个会话自写自己那条 leaf），故走**机械唯一性校验**这条腿——`python3 .trellis/scripts/validate_agenttui_registry.py` 查 `session_id` 的全局唯一性与 `pane_ref` 三元组在**可达 leaf 之间**的唯一性（外加 half-registered 两方向与 index/leaf 一致性），必答时刻见下文矩阵「AgentTUI 注册表一致性」行；**批量改动前后各跑一次**正是本条「校验应在写入前后各跑一次」的落点。
 - **Claim provenance** 走第二种保护——模板给出必填四列表、`validate_claim_provenance.py` 让空白出处/缺口一眼可见。字段语义、命令、错误矩阵、**两个消费点**与存量边界见 [`sendbox`](./sendbox.md#done-信与验收证据的-claim-provenance-门)。
 - **临时/共享资源**走第三种保护——机械产物是下文 landing manifest 的必答项（没命中也必须写 `N/A`）。
 
@@ -103,6 +128,7 @@ overlay 的 `validate_harness_persistence.py` 能对**具名路径**验出 `path
 | **ADR 数字前缀唯一 + 两阶段可见性** | proposed 起草完成时；每次 accept 的改名/状态写入**前**与**后** | auto | `python3 .trellis/scripts/validate_adr_numbers.py --visibility <machine-local\|product-git>`（**该 flag 无默认值，缺失/歧义 exit 2 fail closed**）拒绝重复四位前缀与任何被记规范那个 git 忽略的 `decisions/*.md`；accept 前后两次均须 PASS 并记入 landing manifest |
 | **Harness persistence（machine-local）** | canonical spec/ADR/validator/tool 落盘后；human 授权 `hgit` commit 并执行后 | ask-first | landing manifest 的 `History proof` 必答项：精确 pathspec ＋ `python3 .trellis/scripts/validate_harness_persistence.py <exact-path>...` 逐路径 clean 且输出 `path@commit`。**未获授权写 `pending human commit authorization`，不得声称 durable**；要谈「离开本机」按 [两档强度](#持久化机制也必须有执行者)选 flag |
 | **临时 / 共享资源生命周期** | 创建、发布路径、开始消费、rotate/revoke/删除**任一**时刻；close-out 必答 | auto-judge | landing manifest 必须写 `N/A（本次未创建/发布/消费/清理）`，或逐资源给出**不含 secret** 的 owner / consumer / 权限 / 硬到期（或 managed 提升）/ 清理前「消费者为零」证据 |
+| **AgentTUI 注册表一致性** | gardener 周期性维护时；**任何 GC / 批量注册表改动的前与后**各一次 | auto | `python3 .trellis/scripts/validate_agenttui_registry.py`（六检查：`session_id` 全局唯一〔不受有效态限定〕、`pane_ref` 三元组唯一〔**只在有效态可达的 leaf 之间**——pane 会被顺序复用，非可达却带 `pane_ref` 的另作 `stale-addressing-handle` **warning**、不计入冲突〕、half-registered 两方向、leaf `project` 字段自洽含 `project_id` 重算、index 摘要与 leaf 一致以 leaf 为准）逐条列出冲突双方**具体路径**；退出码 `0/1/2`，全局 index 缺失或非法 JSON **exit 2 fail closed**，低危 warning 印在单独分节且不影响退出码。改动前后两次均须记入 landing manifest。**纯只读、无 `--fix`**——跨项目删别人 leaf 属别的 lane。规则语义见 [`agenttui-registry`](./agenttui-registry.md) §2.2.1 / §2.3 / §4 |
 | HITL 晋升（ADR/spec 落盘）| close-out | HITL（L4/human）| **landing manifest（无条件产出，含为空）** ＋ 前置 Challenge-before-ack |
 
 **代码评审这一行是本矩阵的要点**：评审此前只出现在下面「代码评审」叙述与工具表里，流程里**没有任何一步会强制到达「评审跑了没」这个问题**——于是执行可以既不跑评审、也不记 skip，因为没有一个必答的时刻。补上这一行后，收尾**必然**撞到「跑它 or 记 skip」，而答案就落在同一个 close-out 的 landing manifest 里（评审者姓名，或显式的 `nobody reviewed this`），一眼可审。

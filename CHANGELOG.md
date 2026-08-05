@@ -6,6 +6,85 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
 ## [Unreleased]
 
 ### Added
+- **AgentTUI registry consistency gate** (`overlay/scripts/validate_agenttui_registry.py` + 37 tests,
+  `agenttui-registry.md` §2.2.1/§2.3/§3/§4, `verification-and-gates.md` gate matrix, adopt-wired) —
+  the guide already specified both `half-registered` directions and had **no enforcer at all**, which by
+  this repo's own "a gate with no enforcer is decoration" rule made it decoration. Six checks now run
+  over the global index plus every project leaf tree: `session_id` global uniqueness (one session belongs
+  to one project, **not** state-restricted), `(multiplexer, session, pane_id)` uniqueness **checked
+  independently** of it (two *different* sessions naming one pane means a `pane_ref` has already rotted)
+  and **only among reachable leaves** — panes get **reused in sequence**, so a stopped leaf still holding
+  the old triple is the normal aftermath, and reporting that as a collision would flood the report;
+  it becomes a separate low-severity `stale-addressing-handle` **warning** that does not affect the exit
+  code, kept readable apart from the high-severity `pane-ref-conflict` because the two want opposite
+  handling (stop and fix vs. sweep up later) — half-registered
+  direction A (summary, no leaf) and B (leaf, no summary), leaf `project` self-consistency with
+  `project_id` **recomputed** from `realpath`, and index-summary vs leaf agreement on
+  `role`/`brand`/`state`/`lineage` with the **leaf authoritative**. Every failure names the **full paths
+  of both sides**. Exit `0/1/2`; a missing or unparsable global index is **exit 2 fail-closed** ("cannot
+  read the index" is not "nothing to check"), while one dead project path is reported and the remaining
+  projects are still checked. **Read-only on purpose — there is no `--fix`**: deciding which project a
+  session belongs to, and deleting a leaf in someone else's repo, is another lane's call.
+  The guide also gains the consequence ordering — **mis-delivery (a claimed/rotted `pane_ref`) outranks
+  unreachability (half-registered)**, because unreachability fails loudly to the sender alone while
+  mis-delivery is silent and charges the cost to an uninvolved third-party session.
+- **Five "the registry looks fine but delivery still doesn't land — or lands wrong" shapes + a legitimate
+  use for `dump-screen`** (`agenttui-registry.md` §3) — sandbox half-deafness (can be injected into,
+  **cannot send**), expired auth (bytes arrive, submit key works, target CLI cannot process, transcript
+  keeps **no trace**), long-text corruption without submit, **delivered-but-verified-too-early** (the
+  nonce *is* in the target transcript; the verify window was `10 × 0.1s` = **one second** and ran before
+  the target CLI flushed — a **false negative** that inflates every delivery-failure statistic), and
+  **sender-side envelope corruption** (the envelope lost words *before leaving the sender*, because a
+  quoting form triggered shell substitution; delivery succeeded, the nonce hit past the boundary, **every
+  gate went green**, and the receiver read a sentence that was grammatical but hollowed out). Shapes 1–3
+  look **identical** in the registry and rule 3's nonce yields the **same** `queued-unverified` for all of
+  them — one reading, three different repairs — so `queued-unverified` is not a licence to resend. Shape 4
+  adds the sharper epistemic point: **a wrong reading that comes with a plausible ready-made explanation
+  never gets investigated** ("the target is mid-turn, it's queued" was unfalsifiable and wrong), so any
+  "unverified" reading must be closed on a **falsifiable** criterion, never on a "probably…" narrative;
+  and any classification data collected **before** the window is fixed carries that false negative — fix
+  first, or mark those samples `suspect`. Shape 5 forces the closing conclusion: **the nonce proves the
+  envelope arrived, not that what you meant to say arrived** — remedied structurally (ban substituting
+  quote forms in envelope construction) and by detection (read back and compare verbatim), both recorded.
+  Also recorded: the **codex delivery path is verified working** under short text plus a sufficient
+  window (boundary → focus → short pointer → Tab → ~25s → nonce hit twice), which narrows the codex
+  failure surface to shapes 3 and 4; hence a **recommended delivery shape** — *durable content goes in a
+  letter, direct injection carries only a short pointer* — which sidesteps shape 3 and matches
+  record ⊥ delivery orthogonality. The failure table's last column is deliberately scoped to the
+  **reliability axis only** ("would a different multiplexer fix *this shape's delivery failure*" — all
+  five: no), with a note that the **intrusiveness axis** (directed writes still require stealing focus,
+  which interrupts a human working in the same multiplexer) is untouched by every delivery-side fix, so
+  the table must **not** be read as evidence against changing multiplexer. **Coverage is stated in one
+  deliberately unabbreviated sentence**: *5 known **shapes** covered, each with a signature-level fixture;
+  one shape's trigger pattern constant rests on a **single observation**; and 4 shapes' signature→cause
+  exclusivity rests on "the set of known causes is complete" — an assumption **already falsified twice this
+  round** (three shapes became five).* Writing "5 causes covered" is banned as over-claiming: a fixture
+  proves the **signature** is reproducible, not that the cause is covered, because what a classifier can
+  see is only screen shape, command stdout, and whether a nonce appears past the boundary. Hence the table
+  also carries a mandatory **`unclassified`** row — without it a classifier is forced to file a new cause
+  under the nearest known one, which is exactly what happened both times this round — and the auth pattern
+  constant is tagged `provenance: single-observation` with a **fail-closed** rule: no match ⇒ degrade to
+  `unclassified`, never snap to the nearest shape. `dump-screen` is admitted as an
+  **after-the-fact diagnostic** (separating "text never reached the composer" from "text reached it,
+  never submitted") while staying **banned as an existence preflight** (silent empty + rc=0 on a
+  nonexistent pane) and **not delivery evidence** (rule 3 still only accepts a nonce): reading *empty*
+  is untrustworthy, reading *content* is not.
+- **Epistemology general rule: some rules can only be produced by incidents** (`verification-and-gates.md`,
+  beside "a gate with no enforcer is decoration") — asking "who would notice this wasn't done" supplies a
+  missing *enforcer*, but never supplies a rule you don't yet know you need. Backed by this repo's own
+  measured list (compact rewrite causing delivery false negatives; `--pane-id` not exempting focus;
+  rc=0 with empty stdout when the pane is gone; a sandbox crippling only the outbound direction; expired
+  auth accepting bytes it will never process; a registry leaf with every field correct written into the
+  repo's parent directory; a verify window shorter than the target's flush; an envelope losing words to
+  shell substitution while every gate stayed green; panes being reused in sequence, which makes naive
+  "globally unique pane reference" report normal leftovers as collisions) — **not one of them is derivable
+  from the spec**. Consequences: incident retrospectives must yield a spec increment; this class of rule's
+  evidence tier is legitimately `实测` (a missing theoretical explanation is an acceptable gap, a missing
+  measurement is not); **a wrong reading that comes with a plausible, unfalsifiable explanation never gets
+  investigated**, so a gate's "failed / unverified" reading must be closed on a falsifiable criterion; and
+  incident-born rules must themselves be checked for **false positives** — a gate people learn to ignore is
+  worse than no gate, so the fix is usually splitting one rule by severity (fail vs. warning), not dropping
+  the check. Attribution stays on the *shape*, never on a person or session.
 - **Claim-provenance gate, as one contract** (`overlay/scripts/validate_claim_provenance.py` + tests,
   `overlay/work_context-templates/sendbox/_TEMPLATE-done.md`,
   `overlay/spec/guides/_TEMPLATE-acceptance-evidence.md`, `_TEMPLATE-handoff.md` delta, adopt-wired) —
