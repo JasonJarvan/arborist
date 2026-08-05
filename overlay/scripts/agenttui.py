@@ -63,6 +63,15 @@ DELIVERY_QUEUED_UNVERIFIED = "queued-unverified"
 DELIVERY_NO_OPERATIONAL_ROUTE = "no-operational-route"
 EXIT_NO_OPERATIONAL_ROUTE = 3
 
+# Whether addressing the target disturbed it. Measured, not predicted: the focus
+# probe answers rc=0 when it actually moved the focus (someone's view was pulled
+# away) and rc=2 "already focused" when the target was already there (nobody was
+# disturbed). Recording this per delivery yields the denominator for "how often
+# does delivery actually steal focus" without running any new experiment.
+INTRUSION_FOCUS_MOVED = "focus-moved"
+INTRUSION_NONE = "already-focused"
+INTRUSION_UNKNOWN = "unknown"
+
 ROUTE_PANE = "pane"
 ROUTE_RESUME = "resume"
 
@@ -210,6 +219,20 @@ class PaneTransport:
         side-effect free without saying so.
         """
         raise NotImplementedError
+
+    def addressing_intrusion(self) -> str | None:
+        """Did the last existence probe disturb the target, and how?
+
+        Transports that address panes through focus cannot avoid disturbing a
+        human sharing the multiplexer, and cannot know *in advance* whether a
+        given send will disturb one -- but the probe's own answer says so
+        afterwards. Reporting it turns an architectural cost into a measurable
+        rate, which is what decides whether that cost is worth a migration.
+
+        Returns one of ``INTRUSION_*``, or ``None`` when the transport cannot
+        tell (never guess: an unknown must not be counted as "did not disturb").
+        """
+        return None
 
     def write_chars_argv(self, pane_ref: dict[str, str], text: str) -> list[str]:
         raise NotImplementedError
@@ -444,6 +467,11 @@ def build_envelope(
 # the only trustworthy signal — for the probe *and* for the injection and submit
 # commands themselves. Kept narrow on purpose: a loose "not found" would let
 # unrelated output masquerade as an addressing failure.
+# Not an error: the probe says this when the target pane was already the focus.
+# It shares rc=2 with "not found" but means the opposite, so it lives apart from
+# the rejection patterns and is read as "nobody was disturbed".
+ZELLIJ_ALREADY_FOCUSED_PATTERN = re.compile(r"\bis already focused\b", re.IGNORECASE)
+
 # Only addressing *failures* belong here. Notably absent, on purpose: the probe's
 # "already focused" answer, which shares rc=2 with "not found" but means the
 # opposite (the pane exists and is exactly where we want it). Matching it would
@@ -469,6 +497,7 @@ class ZellijTransport(PaneTransport):
     ) -> None:
         self._runner = runner
         self._which = which
+        self._last_intrusion: str | None = None
 
     def _action_argv(self, pane_ref: dict[str, str], *action: str) -> list[str]:
         return [
@@ -575,17 +604,39 @@ class ZellijTransport(PaneTransport):
         conflicts with a human driving the same multiplexer session.
         """
         outcome = self._run(self.probe_argv(pane_ref), cwd=None, timeout=None)
+        self._last_intrusion = self._classify_intrusion(outcome)
         if outcome.rejected:
             return Capability(
                 False,
                 f"pane {pane_ref['pane_id']!r} in session "
                 f"{pane_ref['session']!r} is not reachable: {outcome.detail}",
             )
+        moved = self._last_intrusion == INTRUSION_FOCUS_MOVED
         return Capability(
             True,
             f"pane {pane_ref['pane_id']!r} in session {pane_ref['session']!r} "
-            "answered the existence probe (focus moved there as a side effect)",
+            + (
+                "answered the existence probe and the focus was moved there "
+                "(a human watching another pane just lost their view)"
+                if moved
+                else "answered the existence probe and was already focused "
+                "(nobody's view was disturbed)"
+            ),
         )
+
+    def _classify_intrusion(self, outcome: CommandOutcome) -> str | None:
+        if outcome.rejected:
+            # Nothing was delivered and nothing moved; the intrusion question
+            # does not apply, and answering "none" would pad the denominator.
+            return None
+        if ZELLIJ_ALREADY_FOCUSED_PATTERN.search(f"{outcome.stdout}\n{outcome.stderr}"):
+            return INTRUSION_NONE
+        if outcome.returncode == 0:
+            return INTRUSION_FOCUS_MOVED
+        return INTRUSION_UNKNOWN
+
+    def addressing_intrusion(self) -> str | None:
+        return self._last_intrusion
 
     def write_chars(
         self,
@@ -1301,6 +1352,11 @@ def send_via_pane(
                 ),
                 "route_mode": ROUTE_PANE,
                 "pane_transport": transport.name,
+                # Measured focus cost of *this* delivery (see INTRUSION_*). It is
+                # reported even on success because the point is the rate, not the
+                # incident: this field is the denominator for deciding whether
+                # focus theft is frequent enough to justify changing transports.
+                "addressing_intrusion": transport.addressing_intrusion(),
                 "target": payload["target"],
                 "target_brand": payload["target_brand"],
                 "nonce": payload["nonce"],
