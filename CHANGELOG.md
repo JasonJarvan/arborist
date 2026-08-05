@@ -190,6 +190,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   rather than re-delegating; ADR-0004 Residual tightened.
 
 ### Fixed
+- **Delivery verification window was one second** (`overlay/scripts/agenttui.py`, `agenttui-registry.md` §3
+  shape 4, +6 tests) — the window was expressed as `attempts × interval` (10 × 0.1), which hid the total
+  behind a multiplication; that is why nobody noticed. Measured three independent times: a target's
+  transcript record lands later than that (one case timed at **< 5s**), so *delivered* envelopes read back
+  as `queued-unverified` — and that false negative then drove the retry branch to press submit **a second
+  time**, i.e. it was actively producing duplicate deliveries. Now a seconds-named window
+  (`PANE_VERIFY_WINDOW_SECONDS`, 20s) with backoff polling and early exit, plus a short separate tier for
+  an active Codex pane whose Tab-queued envelope cannot surface before the turn boundary anyway. The
+  guide records the *direction* as well as the number: early exit means widening costs the success path
+  nothing while narrowing is what manufactures false negatives — widening is fail-safe, narrowing is
+  fail-dangerous, so do not shrink it to make `send` return sooner.
+- **A shipped spec claim carrying this repo's strongest evidence label was wrong in two places**
+  (`agenttui-registry.md` §3, plus the matching code comments) — the guide said the existence probe
+  returns rc=0 for a missing pane and must therefore be judged by *stdout*. Re-measured on one
+  multiplexer version: the probe returns **rc=2**, and the diagnostic is on **stderr**, not stdout.
+  Injection and submit commands *are* rc=0 on failure (that half stands), but their diagnostic is on
+  stderr too while stdout may carry ordinary content (a session list), so "parse stdout" was imprecise
+  everywhere it appeared. The adapter always joined both streams, so this was **documentation wrong,
+  implementation right**; the wording is now "stdout and stderr joined" throughout. The section carries a
+  six-row raw-reading table (command / rc / stdout / stderr per case) and two new rules: an unresolved
+  contradiction between two independent reports about the *already-focused* probe case is recorded
+  explicitly, and until it is settled a non-zero return code must **not** be used as a rejection signal
+  (if the other report is right, that would misjudge the most common case); and granting the
+  "independently reproduced" label now **requires attaching the raw readings** (command + rc + verbatim
+  stdout + verbatim stderr) — conclusions without readings may only claim "reproduction asserted",
+  because the same version and command produced two different reported return codes, so recording the
+  version alone cannot support cross-checking.
 - **Delivery-contract corrections from dogfood** (`overlay/spec/guides/agenttui-registry.md` §3–§5,
   ADR-0007 Amendment 2026-07-29) — five spec-level defects, each tagged with its evidence grade
   (independently reproduced upstream vs. measured downstream and not yet reproduced):
