@@ -895,5 +895,52 @@ class VerificationWindowTests(unittest.TestCase):
         self.assertLess(len(slept), 20)
 
 
+
+class ProbeReturnCodeTests(unittest.TestCase):
+    """rc=2 means "the requested focus change did not happen" -- two opposite causes.
+
+    Measured on one multiplexer version: the probe answers rc=2 both for a pane
+    that does not exist and for a pane that is *already focused*. The second is
+    positive existence evidence and is the state a verified-successful delivery
+    was in, so rejecting on a non-zero code would refuse the healthiest case.
+    Only not-found text may reject.
+    """
+
+    def outcome(self, returncode: int, stderr: str, stdout: str = ""):
+        runner = RecordingRunner([FakeCompleted(returncode, stdout, stderr)])
+        transport = AGENTTUI.ZellijTransport(runner=runner, which=lambda _n: "/x/zellij")
+        return transport.exists(pane_ref("zellij"))
+
+    def test_already_focused_is_not_a_rejection(self) -> None:
+        capability = self.outcome(2, "Pane Terminal(6) is already focused")
+
+        self.assertTrue(capability.ok)
+
+    def test_missing_pane_is_a_rejection_despite_the_same_return_code(self) -> None:
+        capability = self.outcome(2, "Pane with id Terminal(9999) not found")
+
+        self.assertFalse(capability.ok)
+
+    def test_successful_focus_is_silent_and_passes(self) -> None:
+        capability = self.outcome(0, "")
+
+        self.assertTrue(capability.ok)
+
+    def test_missing_session_diagnostic_on_stderr_is_still_caught(self) -> None:
+        # stdout carries ordinary content (a session list) while the diagnostic is
+        # on stderr, so a stdout-only judgement would pass this.
+        capability = self.outcome(
+            0, "Session 'absent' not found. The following sessions are active:",
+            stdout="some-session [Created 1h ago]\n",
+        )
+
+        self.assertFalse(capability.ok)
+
+    def test_already_focused_is_absent_from_the_rejection_patterns(self) -> None:
+        joined = " ".join(p.pattern for p in AGENTTUI.ZELLIJ_NOT_FOUND_PATTERNS)
+
+        self.assertNotIn("focused", joined)
+
+
 if __name__ == "__main__":
     unittest.main()
