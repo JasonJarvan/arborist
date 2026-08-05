@@ -57,10 +57,15 @@ Lane 在 task `prd.md` 顶部声明 `Lane: fast|full`（full 若：动依赖 / �
 ### 本地覆盖入口 [local]（每轮 session 需知；正文见定制层 / 对应 guide）
 - [local] 跨 ATUI 硬边界（别抢活）：别人 lane 的通报=FYI，默认「知道了」，不接手、也别包装成问题上传；只 `handoff` 信 / human 指派才转移归属。判据/范例见 `guides/roles-and-tiering.md`「ATUI 归属边界」。
 - [local] 知识收尾门：交付后（Phase 3.4 commit 后、`/finish-work` 前）按 lane 分级判跑「改动面外全仓知识一致性」扫描，**收尾方自跑**（full lane 即 L2 Impler），不回弹 rootorc。分级/矩阵见 `guides/knowledge-closeout.md`。
+- [local] AgentTUI 自登记（**本 session 开局第一件事**）：本会话若尚未在 `<repo>/.arborist/agents/<name>/` 登记，按 `guides/agenttui-registry.md` §5 自登记 —— 写 `spec.json`（`brand` = **本会话真实 runtime brand**，不按模板/期望路由/模型名猜）+ `runtime.json`（`state: active`、`session_id`/`session_file`、可达则填 `pane_ref`），并同步全局 `~/.arborist/index.json` 摘要。**不登记的后果不是「少个条目」而是「别人找不到你、也投不到你」**；且目标 `.arborist/` 不存在时必须 fail-closed 报 `half-registered`，不得静默上移父目录（§5「写入路径 fail-closed 门」）。
 ```
 
-> 这两条正文分别在本层「角色/任务分层」「知识收尾门」小节；此处只放**注入范围内的一行入口**，使其真能到达每个 session。
+> 前两条正文分别在本层「角色/任务分层」「知识收尾门」小节；此处只放**注入范围内的一行入口**，使其真能到达每个 session。
 > 需给每个 session 加载的新本地规则，都照此再补一行 `- [local]`。
+
+> **为什么自登记这条必须在 `[local]` 块里**（这条入口的由来，值得照抄这个判据）：`agenttui-registry.md` §5 一直写着**怎么**自登记，本层「角色/任务分层」小节也一直写着「session 启动按其 §5 自登记」——但那句在**注入范围之外**的大段落里，新 session **永远读不到它**。实测后果：按 ADOPT.md 全套做对的仓，新起的 ATUI 依然不知道自己该注册；能注册的会话是因为**有人当场口头说了**，不是因为有机制。
+>
+> 这是本仓反复出现的同一形状——**规则存在、可被引用、看着完备，但没有执行者会在需要的时刻遇到它**（同类见 `guides/verification-and-gates.md`「没有执行者的门是装饰」）。注意它与「注入范围」那个已修的缺陷是**两回事**：注入机制修好并加了 `[local]` 块之后，**内容没被搬进来** ⇒ 机制到位、内容漏了。**给每个 session 必须知道的规则加 `[local]` 入口，是这条通则的机械落点**：判据是「哪个执行者、在哪个时刻，会撞上这条规则？」——答不出来的规则就还没有落点。
 
 <!-- 另需在 Phase 1 加 1.0b research-first 步、把 [workflow-state:planning]/Active Task Routing 的 Load `trellis-brainstorm` 改指 SP brainstorming、Phase 2.2 加验证拓扑、Phase 3.3 加 ADR 分流+HITL 晋升门、Phase 3.4 defer git、Phase 3.5 加 WIMTB。逐条见 ADOPT.md。 -->
 
