@@ -190,6 +190,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   rather than re-delegating; ADR-0004 Residual tightened.
 
 ### Fixed
+- **The probe's non-zero return code was recorded as an unresolved contradiction; it is now measured**
+  (`agenttui-registry.md` §3, `agenttui.py` comments, +5 tests) — two independent reports disagreed about
+  what the existence probe answers for an *already-focused* pane (rc=0 + empty vs rc=2 + "already
+  focused"). The case was wrongly judged untestable ("measuring it steals a human's focus"); probing the
+  pane one already occupies steals nobody's focus. Measured directly, twice: **rc=2** with
+  `… is already focused` on **stderr**. The two reports are therefore not a contradiction but two branches
+  of one rule: **rc=2 means "the requested focus change did not happen"**, and it has two opposite causes —
+  the pane is already there (benign, and *positive existence evidence*) or the pane does not exist (fatal).
+  Since both answer rc=2, **a return code cannot separate them**, which upgrades "never reject on a
+  non-zero code" from a cautious choice to a measured requirement: rejecting on rc would refuse delivery to
+  the most common healthy case — the very state a verified-successful delivery was in. Only not-found
+  *text* may reject; `already focused` passes. That pass-through was previously implicit (it simply matched
+  no pattern) and is now explicit in the spec, in a comment on the pattern list, and pinned by tests.
+  Still open, and needing a human present because measuring it switches the active tab: the pane-focused-
+  but-tab-inactive case, and a session with no client attached.
+- **Measurement discipline: merging the two streams makes stream attribution unobservable**
+  (`agenttui-registry.md` §3) — the "diagnostic is on stderr, not stdout" error survived because the
+  readings were collected with `2>&1`, which structurally erases *which* stream said what. The raw data was
+  in hand and the distinction was invisible in it. Any measurement whose conclusion will be used to judge
+  one stream must record the streams **separately**; merged output is for reading what a command said, not
+  for sourcing a decision criterion.
 - **Delivery verification window was one second** (`overlay/scripts/agenttui.py`, `agenttui-registry.md` §3
   shape 4, +6 tests) — the window was expressed as `attempts × interval` (10 × 0.1), which hid the total
   behind a multiplication; that is why nobody noticed. Measured three independent times: a target's

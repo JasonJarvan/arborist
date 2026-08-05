@@ -444,6 +444,10 @@ def build_envelope(
 # the only trustworthy signal — for the probe *and* for the injection and submit
 # commands themselves. Kept narrow on purpose: a loose "not found" would let
 # unrelated output masquerade as an addressing failure.
+# Only addressing *failures* belong here. Notably absent, on purpose: the probe's
+# "already focused" answer, which shares rc=2 with "not found" but means the
+# opposite (the pane exists and is exactly where we want it). Matching it would
+# refuse delivery to the most common healthy case.
 ZELLIJ_NOT_FOUND_PATTERNS = (
     re.compile(r"pane with id\b.*\bnot found", re.IGNORECASE),
     re.compile(r"session '[^']*' not found", re.IGNORECASE),
@@ -520,9 +524,13 @@ class ZellijTransport(PaneTransport):
         # on one multiplexer version: injection and submit commands return 0 for
         # a missing session *and* for a missing pane, and the diagnostic lands on
         # stderr while stdout may carry ordinary content (a session list). The
-        # probe does return non-zero for a missing pane, but a conflicting report
-        # exists for the already-focused case, so a non-zero code is not used as a
-        # rejection signal either -- see agenttui-registry.md section 3.
+        # probe does return non-zero for a missing pane, but a non-zero code is
+        # not a rejection signal either, and that is measured rather than merely
+        # cautious: the probe answers rc=2 both for a pane that does not exist AND
+        # for a pane that is *already focused*. Those two mean opposite things --
+        # the second is positive existence evidence, and it is the state a
+        # verified-successful delivery was in -- so only not-found *text* may
+        # reject. See agenttui-registry.md section 3.
         text = f"{stdout}\n{stderr}"
         for pattern in ZELLIJ_NOT_FOUND_PATTERNS:
             match = pattern.search(text)
