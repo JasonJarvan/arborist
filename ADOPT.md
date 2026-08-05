@@ -5,6 +5,7 @@
 ## 前置（依赖分级见 [`overlay/spec/guides/tool-registry.md`](./overlay/spec/guides/tool-registry.md) §2.5）
 - **required（不装没法用；adopt.sh 会探测，缺失醒目告警 + 给装法，不中断铺设）**：
   - **Trellis**：`npm i -g @mindfoldhq/trellis`，并在你项目 `trellis init --claude --codex -u <name>`（选你的平台）。
+    > ⚠️ **若 `.claude/settings.json` 已被产品仓 git-tracked**（团队共享配置的常见形态）：`trellis init -y` 会**跳过**它以免覆盖团队文件，**后果是 hook 没装上**——SessionStart 不注入，`[local]` 块（含下面的自登记入口）一条都不到达 session，而 init 本身**不报错**。改把 hook 写进 **`.claude/settings.local.json`**（Claude Code 读它、且它按约定不进产品 git），产品文件**零改动**。装完务必**机械验证 hook 真的命中**（起一个新 session 看 `[local]` 行有没有出现），别只看 init 的成功输出。
   - **Superpowers**（workflow 定制层各步骤依赖其 skills）：Claude Code 内 `/plugin install superpowers@claude-plugins-official`。
 - **optional（拒装走各自 fallback，不卡流程）**：`agentsview`（agent 会话历史检索）、`multica`（issue 台账）、`codegraph`（符号图谱 MCP）。adopt.sh 末尾逐个探测处理，见「手动收尾」。
 
