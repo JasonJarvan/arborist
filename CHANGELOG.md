@@ -6,6 +6,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
 ## [Unreleased]
 
 ### Added
+- **Methodology: a new observation must first prove it does not perturb what it observes**
+  (`verification-and-gates.md`, beside the "some rules can only be born from an incident" entry) — the same
+  shape hit this repo three times at three different levels in one session: collecting failure-classification
+  samples before the verification window was fixed (the *data* was perturbed — false negatives would have
+  been frozen into a fictitious cause), using the focus command as the existence probe (the *observed
+  object* was perturbed — the probe pulls the target into focus, so every following reading says "already
+  focused" and a ratio looks cleanest exactly where the disturbance is worst), and adding a read-only
+  context command around that probe (the *tests* were perturbed — the command sequence changed and nine
+  existing tests failed). None was carelessness; all three share the blind spot that **observation is
+  assumed neutral**, which is most dangerous precisely when the action is read-only — read-only is not
+  perturbation-free. The entry's mechanical criterion: ask whether the new observation changes the
+  sequence or state the observed party is in, and **if it does, default it off and produce a mechanical
+  proof that behaviour with it off is identical to before the feature existed** — the last clause is what
+  turns "I'll try not to interfere" into something verifiable. Three corollaries are recorded: observation
+  data is only valid from the moment the instrument was fixed, events beat aggregates when the observation
+  changes later readings (the bias is one-directional toward *under*-counting), and unknown must stay
+  distinguishable from "did not happen".
+- **A criterion for when direct injection is warranted at all** (`agenttui-registry.md` §3) — the
+  delivery-shape convention (durable content in a letter, direct injection carries only a short pointer)
+  had no criterion for the *decision*, and was measurably used backwards: two collaborating sessions each
+  direct-injected a dozen long envelopes in one evening, nearly all of them **conversation**. The rule now
+  states it plainly: direct injection is a *delivery notification*, the letter is the record, so **only a
+  message that requires the recipient to change behaviour immediately** (a blocker, a correction, revoking
+  a decision already being executed) is injected; everything else goes to the inbox and is picked up
+  naturally. Getting this backwards is systematic rather than careless — the highest-frequency, least
+  durable content is exactly what least needs injecting, and also exactly what is most tempting to inject,
+  because it is happening now. Its cost is now measurable: one injection was observed switching a human's
+  entire view to another tab, away from the conversation they were having.
 - **Focus-intrusion observations are recorded as events with stratification, never as a rate**
   (`agenttui.py` `append_observation` / `addressing_observation` / `--observation-log`,
   `agenttui-registry.md` §3, +9 tests) — the counter added in the previous entry would have
