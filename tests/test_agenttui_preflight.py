@@ -38,6 +38,13 @@ def load_script_module(relative_path: str, module_name: str):
 
 
 AGENTTUI = load_script_module("overlay/scripts/agenttui.py", "agenttui_under_test")
+
+# No test may append to the developer's real observation log. Repointed once for
+# the whole module so that a future test invoking `send` cannot leak into $HOME.
+_OBSERVATION_SANDBOX = TemporaryDirectory()
+AGENTTUI.OBSERVATION_LOG_DEFAULT = (
+    Path(_OBSERVATION_SANDBOX.name) / "focus-intrusion.jsonl"
+)
 CAPACITY = load_script_module(
     "overlay/scripts/arborist_brand_capacity.py", "capacity_under_test"
 )
@@ -1001,6 +1008,129 @@ class FocusIntrusionCounterTests(unittest.TestCase):
     def test_the_abstract_transport_refuses_to_guess(self) -> None:
         # A transport that cannot tell must return None, never "none".
         self.assertIsNone(AGENTTUI.PaneTransport().addressing_intrusion())
+
+
+
+class ObservationRecordingTests(unittest.TestCase):
+    """Events, never rates -- and the measurement must not perturb non-measurers.
+
+    Two measured hazards drive this shape. A ratio looks *cleanest* in the burst
+    traffic that disturbs a human most, because the probe itself pulls the pane
+    into focus and every following send to it then reads "already focused". And an
+    aggregate hides the stratification that carries the whole question. So each
+    delivery emits one event with its own context and folding is left to analysis.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.log = Path(self.temporary.name) / "nested" / "focus.jsonl"
+
+    def transport(self, layout_before: str, layout_after: str, *, probe_rc: int = 0,
+                  probe_stderr: str = "", observe: bool = True):
+        outcomes = [
+            FakeCompleted(0, layout_before, ""),
+            FakeCompleted(probe_rc, "", probe_stderr),
+            FakeCompleted(0, layout_after, ""),
+        ]
+        if not observe:
+            outcomes = [FakeCompleted(probe_rc, "", probe_stderr)]
+        runner = RecordingRunner(outcomes)
+        transport = AGENTTUI.ZellijTransport(runner=runner, which=lambda _n: "/x/z")
+        transport.observe_addressing = observe
+        return transport, runner
+
+    @staticmethod
+    def layout(focused_tab: str) -> str:
+        return (
+            'layout {\n    tab name="Other" hide_floating_panes=true {\n'
+            '        pane\n    }\n'
+            f'    tab name="{focused_tab}" focus=true hide_floating_panes=true {{\n'
+            '        pane focus=true\n    }\n'
+            "    swap_tiled_layout name=\"vertical\" {\n        tab max_panes=5 {\n"
+            "            pane\n        }\n    }\n}\n"
+        )
+
+    def test_a_tab_switch_is_recorded_as_the_strongest_disturbance(self) -> None:
+        transport, _runner = self.transport(self.layout("Mine"), self.layout("Theirs"))
+
+        transport.exists(pane_ref("zellij"))
+        observation = transport.addressing_observation()
+
+        self.assertEqual("Mine", observation["active_tab_before"])
+        self.assertEqual("Theirs", observation["active_tab_after"])
+        self.assertTrue(observation["tab_switched"])
+
+    def test_same_tab_is_recorded_as_no_switch(self) -> None:
+        transport, _runner = self.transport(self.layout("Mine"), self.layout("Mine"))
+
+        transport.exists(pane_ref("zellij"))
+
+        self.assertFalse(transport.addressing_observation()["tab_switched"])
+
+    def test_an_unreadable_layout_is_unknown_not_no_switch(self) -> None:
+        # None, never False: a missing reading must not be reported as "nothing
+        # happened", which is the direction that understates the real rate.
+        transport, _runner = self.transport("no tabs here", self.layout("Mine"))
+
+        transport.exists(pane_ref("zellij"))
+        observation = transport.addressing_observation()
+
+        self.assertIsNone(observation["active_tab_before"])
+        self.assertIsNone(observation["tab_switched"])
+
+    def test_swap_layout_templates_are_not_mistaken_for_tabs(self) -> None:
+        transport, _runner = self.transport(self.layout("Real"), self.layout("Real"))
+
+        transport.exists(pane_ref("zellij"))
+
+        self.assertEqual("Real", transport.addressing_observation()["active_tab_before"])
+
+    def test_not_observing_issues_no_extra_commands(self) -> None:
+        # The regression that matters for everyone else: a caller who is not
+        # recording observations must see exactly the old command sequence.
+        transport, runner = self.transport("", "", observe=False)
+
+        transport.exists(pane_ref("zellij"))
+
+        self.assertEqual(1, len(runner.calls))
+        observation = transport.addressing_observation()
+        # Still reported, still as unknown -- absence would read as "no switch".
+        self.assertIsNone(observation["active_tab_before"])
+        self.assertIsNone(observation["tab_switched"])
+
+    def test_observation_is_appended_and_private(self) -> None:
+        AGENTTUI.append_observation({"intrusion": "focus-moved"}, self.log)
+        AGENTTUI.append_observation({"intrusion": "already-focused"}, self.log)
+
+        lines = self.log.read_text(encoding="utf-8").strip().splitlines()
+
+        self.assertEqual(2, len(lines))
+        self.assertEqual("focus-moved", json.loads(lines[0])["intrusion"])
+        self.assertEqual(0o600, self.log.stat().st_mode & 0o777)
+
+    def test_no_log_path_records_nothing(self) -> None:
+        AGENTTUI.append_observation({"intrusion": "focus-moved"}, None)
+
+        self.assertFalse(self.log.exists())
+
+    def test_a_failed_write_never_costs_the_delivery(self) -> None:
+        unwritable = Path(self.temporary.name) / "as-a-file" / "focus.jsonl"
+        unwritable.parent.write_text("not a directory", encoding="utf-8")
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            AGENTTUI.append_observation({"intrusion": "focus-moved"}, unwritable)
+
+        self.assertIn("delivery itself is unaffected", stderr.getvalue())
+
+    def test_the_script_computes_no_intrusion_rate_anywhere(self) -> None:
+        # Pins the "events only" decision mechanically: a ratio computed in this
+        # script would be systematically wrong in both directions described above.
+        source = Path(ROOT / "overlay/scripts/agenttui.py").read_text(encoding="utf-8")
+
+        for forbidden in ("intrusion_rate", "focus_moved_ratio", "intrusion_percent"):
+            self.assertNotIn(forbidden, source)
 
 
 if __name__ == "__main__":
