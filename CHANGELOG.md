@@ -5,6 +5,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
 
 ## [Unreleased]
 
+### Added
+- **Receiver-side submit-ack handshake: a causal delivery reading next to the existing bystander one**
+  (`overlay/scripts/agenttui_submit_ack.py`, `overlay/hook-templates/submit-ack/`,
+  `agenttui-registry.md` §3 rule 8, one `[local]` injection entry, +28 tests) — the only delivery
+  evidence so far was the sender walking the target's transcript for the per-send nonce. That reading is
+  *bystander*: it lags the target CLI's own flush (a 1-second verification window read an already
+  delivered envelope as unverified and provoked a duplicate submit), and it cannot separate "the text is
+  piled up in the composer and was never submitted" from "submitted but not yet flushed" — the first of
+  which is the pain actually reported. The receiving CLI's submit hook fires *only* on a real submit, so
+  an ack is causal proof of submission. Acks are appended one JSON object per line to a global
+  `~/.arborist/submit-acks.jsonl` (append-only because several ATUIs write concurrently and a
+  read-modify-write loses records; same naming and permission handling as the focus-intrusion event log —
+  0600 on creation, an existing mode left exactly as found). A record carries only what the hook can
+  itself prove — nonce, timestamp, receiver brand/agent/project/session, the matched envelope header
+  fields — and structurally never the message body. Two hard properties, both mechanically pinned: the
+  recorder **always exits 0** (a non-zero submit hook blocks a real person's prompt) and **always writes
+  an empty stdout** (some brands inject hook stdout as context), so every failure degrades to a stderr
+  warning. Wiring is manual and comes in two forms, with a sibling hook command preferred over pasting
+  into the shipped hook script precisely because it makes "does not change the existing hook's behaviour"
+  structural rather than test-dependent; the paste-in form is nevertheless covered by a differential test
+  that runs a hook fixture with and without the snippet and requires byte-identical stdout and exit code.
+  The fail-safe direction is the load-bearing part: **a missing ack means unconfirmed, never "not
+  submitted"** — the hook may be uninstalled, silently skipped at init time when the host settings file is
+  tracked by the product repo, or its write may have failed, and asserting non-submission from an absent
+  record would trigger a capability-ladder downgrade and re-deliver a message the target already has. An
+  ack may therefore only *prevent* a downgrade, never cause one. Not implemented, and stated as a gap in
+  the guide: `agenttui.py` does not consult the table yet, so no delivery result carries an ack field and
+  the seven-value upgrades are, for now, a human reading rather than a mechanical one.
+
 ### Changed
 - **Pane reachability and current Codex turn activity are now two separate readings**
   (`agenttui.py` `derive_codex_submit_activity` / `build_pane_route`, `agenttui-registry.md` §3 rule 1,
@@ -427,6 +456,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   has permanent work, and every finding it reports was avoidable.
 
 ### Fixed
+- **Two corrections to the ack module found while reviewing it, both silent-failure shaped** — (a) the
+  envelope header parser only handled the **multi-line** form, so an envelope flattened onto one line
+  produced **no ack at all**; since neither the composer's newline handling nor a brand's hook-payload
+  normalisation is under this repo's control, that failure was both reachable and silent — and silent means
+  *indistinguishable from "the target never submitted"*, the exact confusion this facility exists to remove.
+  Both forms now parse, the body is cut at its marker so prose containing `key=value` can never contribute a
+  header field, and all four shapes (flat, multi-line, flattened-without-nonce, bare mention in prose) are
+  pinned by tests. (b) The multiplexer session lifecycle prescription shipped one commit earlier named the
+  wrong mechanism: "destroy the session when no client is attached" is an **inference, not a cause** — it
+  only sees whether a client is attached *right now*, so it cannot tell "the human closed the window" from
+  "the human stepped away", and those two want opposite handling. Measured replacement, per case, in an
+  isolated test session: closing the outer tab delivers a **catchable `SIGHUP`** to the pane's foreground
+  process (verified end to end — inner session present before, gone after), detaching the *outer* session
+  sends no signal at all and both sessions survive, and detaching the *inner* session returns normally.
+  Trapping the close event is therefore both more precise and kinder: an inner detach becomes a legitimate
+  operation again instead of "press one key by mistake and kill a working agent". The section also records
+  *why* the wrong prescription was written: the two layers each have a "detach" and they were conflated, so
+  the guide now forbids the bare word — it must always say **outer** detach or **inner** detach. Recorded as
+  unverified: whether other multiplexer implementations also signal on pane close (it is observed behaviour,
+  not a standard requirement).
 - **The tiebreak shipped one commit earlier rested on a false premise: "cross-repo duplicate = stray
   registration, delete the wrong one"** (`agenttui-registry.md` §2.2.1, `validate_agenttui_registry.py`
   wording, +2 tests) — reading the leaves' actual contents (rather than judging from the finding alone)
