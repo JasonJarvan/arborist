@@ -2897,5 +2897,164 @@ class SubmitAckConsumptionTests(unittest.TestCase):
         self.assertEqual(AGENTTUI.ACK_STATUS_UNAVAILABLE, reading["ack_status"])
 
 
+class SelfRegistrationRollupTests(unittest.TestCase):
+    """A1: a session that just self-registered must be able to complete a heartbeat.
+
+    Before this, the roll-up refused when the summary (or the project entry) was
+    absent -- which is exactly the state right after a correct self-registration.
+    So the documented "self-register, then heartbeat" sequence could not complete:
+    the first heartbeat always failed, and it failed *after* the leaf was already
+    on disk, i.e. it reported `error` for a half-success.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.repo = self.root / "demo-repo"
+        (self.repo / ".trellis").mkdir(parents=True)
+        self.leaf = self.repo / ".arborist" / "agents" / "an-agent"
+        self.leaf.mkdir(parents=True)
+        self.project_id = "0123456789ab"
+        (self.leaf / "spec.json").write_text(
+            json.dumps(
+                {
+                    "name": "an-agent",
+                    "role": "impler",
+                    "brand": "claude-code",
+                    "lineage": 3,
+                    "project": {"path": str(self.repo), "project_id": self.project_id},
+                }
+            ),
+            encoding="utf-8",
+        )
+        session_file = self.root / "session.jsonl"
+        session_file.write_text("line\n", encoding="utf-8")
+        (self.leaf / "runtime.json").write_text(
+            json.dumps(
+                {
+                    "session_id": "a-session-id",
+                    "session_file": str(session_file),
+                    "state": "active",
+                    "last_seen": "2026-01-01T00:00:00+00:00",
+                    "pane_ref": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.index = self.root / "index.json"
+
+    def write_index(self, payload) -> None:
+        self.index.write_text(json.dumps(payload), encoding="utf-8")
+
+    def read_index(self):
+        return json.loads(self.index.read_text(encoding="utf-8"))
+
+    def run_state(self):
+        return AGENTTUI.write_runtime_state(
+            self.repo,
+            "an-agent",
+            state="active",
+            now="2026-02-02T00:00:00+00:00",
+            global_index=self.index,
+        )
+
+    def test_first_heartbeat_after_self_registration_succeeds(self) -> None:
+        # The project exists but the agent summary does not -- the exact state a
+        # correct self-registration leaves behind.
+        self.write_index(
+            {"projects": [{"project_id": self.project_id, "path": str(self.repo), "name": "demo-repo", "agents": []}]}
+        )
+
+        result = self.run_state()
+
+        self.assertEqual("written", result["leaf"])
+        self.assertEqual("created-summary", result["summary"])
+        summaries = self.read_index()["projects"][0]["agents"]
+        self.assertEqual(1, len(summaries))
+        self.assertEqual("an-agent", summaries[0]["name"])
+
+    def test_an_absent_project_entry_is_created_too(self) -> None:
+        self.write_index({"projects": []})
+
+        result = self.run_state()
+
+        self.assertEqual("created-project", result["summary"])
+        project = self.read_index()["projects"][0]
+        self.assertEqual(self.project_id, project["project_id"])
+        self.assertEqual(str(self.repo), project["path"])
+
+    def test_created_entries_are_marked_so_an_auditor_can_tell(self) -> None:
+        # Silent creation would make a mis-derived project id look like it had
+        # always been there.
+        self.write_index({"projects": []})
+
+        self.run_state()
+
+        project = self.read_index()["projects"][0]
+        self.assertEqual("agenttui-rollup", project["created_by"])
+        self.assertEqual("agenttui-rollup", project["agents"][0]["created_by"])
+
+    def test_lineage_is_rolled_up_not_defaulted_away(self) -> None:
+        self.write_index({"projects": []})
+
+        self.run_state()
+
+        self.assertEqual(3, self.read_index()["projects"][0]["agents"][0]["lineage"])
+
+    def test_an_existing_summary_is_updated_not_duplicated(self) -> None:
+        self.write_index(
+            {
+                "projects": [
+                    {
+                        "project_id": self.project_id,
+                        "path": str(self.repo),
+                        "name": "demo-repo",
+                        "agents": [{"name": "an-agent", "brand": "stale", "state": "stopped"}],
+                    }
+                ]
+            }
+        )
+
+        result = self.run_state()
+
+        self.assertEqual("updated", result["summary"])
+        summaries = self.read_index()["projects"][0]["agents"]
+        self.assertEqual(1, len(summaries))
+        self.assertEqual("claude-code", summaries[0]["brand"])
+
+    def test_a_damaged_index_reports_both_halves_and_refuses_to_advise_a_retry(self) -> None:
+        # The regression guard that matters most: replacing a loud error with a
+        # quiet half-success would be worse, and telling the caller to retry a
+        # failure that cannot improve would send it into a hopeless loop.
+        self.write_index({"projects": "not-an-array"})
+
+        result = self.run_state()
+
+        self.assertEqual("written", result["leaf"])
+        self.assertEqual("failed", result["summary"])
+        self.assertEqual("no", result["summary_self_repairing"])
+        self.assertIn("do NOT just retry", result["recommended_action"])
+        self.assertIn("half-registered", result["recommended_action"])
+
+    def test_the_leaf_is_still_written_when_the_rollup_fails(self) -> None:
+        # The original bug: the leaf was already on disk and the caller was told
+        # `error`, with no way to tell "nothing happened" from "half happened".
+        self.write_index({"projects": "not-an-array"})
+
+        self.run_state()
+
+        runtime = json.loads((self.leaf / "runtime.json").read_text(encoding="utf-8"))
+        self.assertEqual("2026-02-02T00:00:00+00:00", runtime["last_seen"])
+
+    def test_no_global_index_requested_is_not_a_failure(self) -> None:
+        result = AGENTTUI.write_runtime_state(
+            self.repo, "an-agent", state="active", now="2026-02-02T00:00:00+00:00",
+            global_index=None,
+        )
+
+        self.assertEqual("not-requested", result["summary"])
+
+
 if __name__ == "__main__":
     unittest.main()
