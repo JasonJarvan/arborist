@@ -13,7 +13,9 @@ import shutil
 import subprocess
 import sys
 import time
+import tempfile
 import uuid
+from collections.abc import Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
@@ -26,6 +28,16 @@ CODEX_PANE_SUBMIT_DELAY_SECONDS = 1.0
 # Codex's busy-TUI queue shortcut is Tab; Enter steers the current turn.
 CODEX_PANE_QUEUE_BYTE = "9"
 PANE_ENTER_BYTE = "13"
+# Brands whose TUI classifies a fast character stream as a paste burst and then
+# treats the submit key as a newline *inside* that burst instead of submitting.
+# Measured on one Codex version by a downstream adopter: the target was
+# mechanically idle, both submit-key commands returned 0, and the envelope still
+# sat in the composer; framing the same text as an explicit paste made the nonce
+# appear about a second later. Deliberately a narrow allow-list, not "always
+# frame": the same framing has no evidence behind it for other brands, and their
+# composers may treat a paste differently (Claude Code, for instance, has its own
+# paste handling). Adding a brand here needs its own measurement.
+PASTE_FRAMED_BRANDS = frozenset({"codex"})
 # Delivery-verification window, expressed in SECONDS on purpose. The previous
 # form (attempts x interval = 10 x 0.1) hid the total behind a multiplication,
 # which is exactly why nobody noticed the window was one second. Measured three
@@ -46,22 +58,101 @@ PANE_VERIFY_WINDOW_SECONDS = 20.0
 # nothing there, and `queued-for-next-turn` is the contractually expected
 # reading -- so that tier stays deliberately short.
 PANE_VERIFY_QUEUED_WINDOW_SECONDS = 1.0
+# How long a *detached* resume runner is watched for the nonce. Same early-exit
+# reasoning as the pane window, plus one difference that matters: this window
+# bounds observation only. It never bounds the runner, which carries the target's
+# whole turn and is deliberately left alive when the window ends.
+RESUME_VERIFY_WINDOW_SECONDS = 20.0
 PANE_VERIFY_POLL_INITIAL_SECONDS = 0.1
 PANE_VERIFY_POLL_MAX_SECONDS = 1.0
+# Terminal-standard bracketed-paste markers (see PaneTransport.frame_paste).
+BRACKETED_PASTE_START = "\x1b[200~"
+BRACKETED_PASTE_END = "\x1b[201~"
 NONCE_PATTERN = re.compile(r"[A-Za-z0-9._:-]+")
 
 # A derived repository root is only usable if it really is a project repository.
 # See agenttui-registry.md §3 "delivery preflight" (path-derivation half).
 REPO_MARKERS = (".trellis", ".git")
 
-# Delivery outcome vocabulary. "no-operational-route" (nothing was sent, retry is
-# safe and necessary) and "queued-unverified" (bytes went out, delivery is
-# unproven, blind retry may enqueue a duplicate) are deliberately distinct
-# values — see agenttui-registry.md §3 rules 2/3/6.
+# Delivery outcome vocabulary, classified BY THE ACTION THAT WAS ACTUALLY
+# EXECUTED rather than by a guess about the future. The single former
+# "queued-unverified" bucket covered outcomes whose correct caller behaviour is
+# opposite (wait out a turn boundary / recover an unsubmitted composer / inspect a
+# command that never reported back), so a caller could not tell which one it had.
+# See agenttui-registry.md §3 rule 4.
 DELIVERY_DELIVERED = "delivered"
-DELIVERY_QUEUED_UNVERIFIED = "queued-unverified"
+DELIVERY_PRE_INJECTION_REJECTED = "pre-injection-rejected"
+DELIVERY_QUEUED_FOR_NEXT_TURN = "queued-for-next-turn"
+DELIVERY_SUBMIT_UNVERIFIED = "submit-unverified"
+DELIVERY_COMPOSER_UNSUBMITTED = "composer-unsubmitted"
+DELIVERY_WRITE_UNVERIFIED = "write-unverified"
+DELIVERY_SUBMIT_COMMAND_UNVERIFIED = "submit-command-unverified"
+DELIVERY_RESUME_STARTED_UNVERIFIED = "resume-started-unverified"
+DELIVERY_RESUME_EXITED_UNVERIFIED = "resume-exited-unverified"
 DELIVERY_NO_OPERATIONAL_ROUTE = "no-operational-route"
+
+# (recommended_action, verification_guidance) per outcome. A table rather than
+# inline strings so that "which caller action does this outcome imply" is one
+# greppable place, and so that adding an outcome without an action is impossible.
+OUTCOME_GUIDANCE: dict[str, tuple[str, str]] = {
+    DELIVERY_DELIVERED: (
+        "await-peer-ack",
+        "nonce-proves-transport-entry-not-semantic-acceptance",
+    ),
+    DELIVERY_PRE_INJECTION_REJECTED: (
+        "retry-after-turn-state-readable",
+        "no-pane-command-executed",
+    ),
+    DELIVERY_QUEUED_FOR_NEXT_TURN: (
+        "wait-for-turn-boundary-do-not-resend",
+        "early-transcript-miss-is-not-nondelivery-evidence",
+    ),
+    DELIVERY_SUBMIT_UNVERIFIED: (
+        "inspect-target-or-await-ack-do-not-blind-resend",
+        "do-not-infer-retry-safety-from-a-transcript-miss",
+    ),
+    DELIVERY_COMPOSER_UNSUBMITTED: (
+        "recover-existing-composer-do-not-rewrite",
+        "envelope-text-is-in-the-composer-unsubmitted",
+    ),
+    DELIVERY_WRITE_UNVERIFIED: (
+        "inspect-target-do-not-resend",
+        "command-failure-does-not-prove-zero-side-effects",
+    ),
+    DELIVERY_SUBMIT_COMMAND_UNVERIFIED: (
+        "inspect-target-or-await-ack-do-not-blind-resend",
+        "command-failure-does-not-prove-zero-side-effects",
+    ),
+    DELIVERY_RESUME_STARTED_UNVERIFIED: (
+        "await-transcript-or-peer-ack-do-not-resend",
+        "detached-runner-continues-after-sender-exit-do-not-resend",
+    ),
+    DELIVERY_RESUME_EXITED_UNVERIFIED: (
+        "inspect-target-and-runner-exit-do-not-blind-resend",
+        "runner-exit-does-not-prove-zero-side-effects-do-not-blind-resend",
+    ),
+}
+
+# ``retry_safe`` is a claim that resending cannot duplicate anything, so it may
+# only be set where zero pane commands are *mechanically* provable. Exactly two
+# outcomes qualify: the send-side precondition failed before any command
+# (no-operational-route), and the Codex turn state was unreadable before the
+# first pane command (pre-injection-rejected). Everything else — including a
+# command that merely failed to report back — is false, because a failed command
+# does not prove the absence of side effects.
+RETRY_SAFE_OUTCOMES = frozenset(
+    {DELIVERY_NO_OPERATIONAL_ROUTE, DELIVERY_PRE_INJECTION_REJECTED}
+)
+
 EXIT_NO_OPERATIONAL_ROUTE = 3
+# One pane command was issued and the result is indeterminate: the envelope may
+# be sitting in the composer, or a command may have had a side effect without
+# reporting it. Non-zero so that a shell caller cannot mistake it for delivery.
+EXIT_UNCERTAIN_DELIVERY = 2
+# Nothing was sent and retrying is safe, but unlike no-operational-route the
+# route itself was fine — only the Codex turn state was unreadable. A distinct
+# code so a caller can tell "repair the route" from "read the state again".
+EXIT_PRE_INJECTION_REJECTED = 4
 
 # Whether addressing the target disturbed it. Measured, not predicted: the focus
 # probe answers rc=0 when it actually moved the focus (someone's view was pulled
@@ -106,14 +197,31 @@ ROUTE_PANE = "pane"
 ROUTE_RESUME = "resume"
 
 
+SUBMIT_ACTIVITY_ACTIVE = "active"
+SUBMIT_ACTIVITY_IDLE = "idle"
+# Codex turn-boundary event types in the target's own transcript. These are the
+# only mechanical evidence of "is a turn running right now"; transcript freshness
+# is NOT that evidence (see agenttui-registry.md §3 rule 1).
+CODEX_TURN_STARTED_EVENT = "task_started"
+CODEX_TURN_COMPLETE_EVENT = "task_complete"
+
+
 class RegistryError(RuntimeError):
     """The registry is incomplete, inconsistent, or unsafe to use."""
+
+
+class CodexTurnStateUnknown(RegistryError):
+    """No safe Codex submit key can be chosen, and nothing has been sent yet.
+
+    Raised only while zero pane commands have run, which is what lets the
+    resulting outcome claim ``retry_safe=true`` (see RETRY_SAFE_OUTCOMES).
+    """
 
 
 class NoOperationalRoute(RegistryError):
     """No delivery route is operational, so nothing was sent.
 
-    Strictly distinct from ``queued-unverified``: that one means the envelope
+    Strictly distinct from every ``*-unverified`` outcome: those mean the envelope
     left this process and delivery could not be proven, so a blind retry risks a
     duplicate (rule 2). This one means the send-side precondition failed and the
     envelope never went out, so retrying is both safe and necessary.
@@ -280,7 +388,36 @@ class PaneTransport:
         """
         return {}
 
-    def write_chars_argv(self, pane_ref: dict[str, str], text: str) -> list[str]:
+    def frame_paste(self, text: str) -> str:
+        """Mark ``text`` as one paste burst rather than a stream of keystrokes.
+
+        WHY THIS SITS ON THE ABSTRACTION AND NOT IN ``ZellijTransport`` ALONE:
+        the *intent* — "deliver this envelope as a single paste, so the receiving
+        TUI cannot interleave the submit key into it" — is a transport capability
+        question that any pane transport must answer, and the routing layer asks
+        it without naming a multiplexer (``DeliveryRoute.paste_framed``). The
+        *mechanism* is per transport, which is why this is an overridable method
+        and not a module-level string operation: the sequences below are the
+        terminal-standard bracketed-paste markers, correct for any transport whose
+        write primitive is a raw byte stream into the pane's pty (which is what
+        every multiplexer's "type this text" verb is). A transport with a native
+        paste primitive — a buffer-load-and-paste verb, say — should override this
+        and use it instead of injecting escape bytes.
+
+        Not free of a caveat: the receiving application must have bracketed-paste
+        mode enabled for these bytes to be interpreted rather than displayed. That
+        is why the caller decides by brand (PASTE_FRAMED_BRANDS) instead of this
+        being applied unconditionally.
+        """
+        return f"{BRACKETED_PASTE_START}{text}{BRACKETED_PASTE_END}"
+
+    def write_chars_argv(
+        self,
+        pane_ref: dict[str, str],
+        text: str,
+        *,
+        paste_framed: bool = False,
+    ) -> list[str]:
         raise NotImplementedError
 
     def send_key_argv(self, pane_ref: dict[str, str], key_byte: str) -> list[str]:
@@ -291,6 +428,7 @@ class PaneTransport:
         pane_ref: dict[str, str],
         text: str,
         *,
+        paste_framed: bool = False,
         cwd: Path | None = None,
         timeout: float | None = None,
     ) -> CommandOutcome:
@@ -317,6 +455,10 @@ class DeliveryRoute(NamedTuple):
     pane_ref: dict[str, str] | None = None
     pane_text: str | None = None
     submit_byte: str | None = None
+    # Capability question, asked without naming a transport: must this text reach
+    # the pane as one paste burst rather than as a keystroke stream?
+    paste_framed: bool = False
+    submit_activity: str | None = None
     preflight: Capability | None = None
     warnings: tuple[str, ...] = ()
 
@@ -324,7 +466,9 @@ class DeliveryRoute(NamedTuple):
         if self.mode != ROUTE_PANE or self.transport is None:
             return None
         assert self.pane_ref is not None and self.pane_text is not None
-        return self.transport.write_chars_argv(self.pane_ref, self.pane_text)
+        return self.transport.write_chars_argv(
+            self.pane_ref, self.pane_text, paste_framed=self.paste_framed
+        )
 
     def submit_argv(self) -> list[str] | None:
         if self.mode != ROUTE_PANE or self.transport is None:
@@ -570,9 +714,19 @@ class ZellijTransport(PaneTransport):
     def probe_argv(self, pane_ref: dict[str, str]) -> list[str]:
         return self._action_argv(pane_ref, "focus-pane-id", pane_ref["pane_id"])
 
-    def write_chars_argv(self, pane_ref: dict[str, str], text: str) -> list[str]:
+    def write_chars_argv(
+        self,
+        pane_ref: dict[str, str],
+        text: str,
+        *,
+        paste_framed: bool = False,
+    ) -> list[str]:
+        # This verb types the argument into the pane as a raw byte stream, so the
+        # standard bracketed-paste markers from the base class are exactly right
+        # here; no zellij-specific paste primitive exists to prefer over them.
+        payload = self.frame_paste(text) if paste_framed else text
         return self._action_argv(
-            pane_ref, "write-chars", "--pane-id", pane_ref["pane_id"], text
+            pane_ref, "write-chars", "--pane-id", pane_ref["pane_id"], payload
         )
 
     def send_key_argv(self, pane_ref: dict[str, str], key_byte: str) -> list[str]:
@@ -740,11 +894,14 @@ class ZellijTransport(PaneTransport):
         pane_ref: dict[str, str],
         text: str,
         *,
+        paste_framed: bool = False,
         cwd: Path | None = None,
         timeout: float | None = None,
     ) -> CommandOutcome:
         return self._run(
-            self.write_chars_argv(pane_ref, text), cwd=cwd, timeout=timeout
+            self.write_chars_argv(pane_ref, text, paste_framed=paste_framed),
+            cwd=cwd,
+            timeout=timeout,
         )
 
     def send_key(
@@ -777,6 +934,110 @@ def resolve_transport(
     return None if factory is None else factory()
 
 
+# --- Codex submit activity (read-only, zero pane commands) --------------------
+# Reachability and submit activity are two different questions that used to be
+# answered by one value. Transcript freshness says "this pane is probably worth
+# addressing"; it does NOT say "a turn is running right now". A target whose turn
+# has just finished is still inside the freshness window, so routing on freshness
+# hands Tab to an *idle* composer, where it enqueues nothing and the envelope sits
+# there unsubmitted. This derivation answers the second question separately, from
+# the target's own turn-boundary events.
+#
+# It reads a file and issues no transport command, which is what keeps the
+# resulting refusal honest: an unreadable turn state must be reported as "nothing
+# was sent", and that claim is only true if this inspection cannot touch the pane.
+
+
+def iter_reverse_lines(
+    path: Path,
+    *,
+    chunk_size: int = 64 * 1024,
+    end_offset: int | None = None,
+) -> Iterator[bytes]:
+    """Yield a file's lines newest-first without reading the whole file.
+
+    Transcripts grow without bound and the interesting record is always near the
+    end, so a forward scan would make the cost of choosing a submit key scale
+    with the target's history.
+    """
+    with path.open("rb") as stream:
+        file_size = stream.seek(0, os.SEEK_END)
+        position = file_size if end_offset is None else min(end_offset, file_size)
+        remainder = b""
+        while position > 0:
+            read_size = min(chunk_size, position)
+            position -= read_size
+            stream.seek(position)
+            parts = (stream.read(read_size) + remainder).split(b"\n")
+            remainder = parts[0]
+            for line in reversed(parts[1:]):
+                if line:
+                    yield line
+        if remainder:
+            yield remainder
+
+
+def derive_codex_submit_activity(session_file: Path) -> str | None:
+    """Is the target Codex session executing a turn right now? None = unknown.
+
+    The answer is the latest complete turn-boundary event, newest-first. A
+    non-empty transcript whose last line has no terminating newline is a
+    concurrent write in progress: that is reported as unknown rather than skipped,
+    because skipping it would reuse an *older* boundary and confidently return
+    the state the target was in before the record currently being written.
+    """
+    try:
+        with session_file.open("rb") as transcript:
+            snapshot_size = transcript.seek(0, os.SEEK_END)
+            if snapshot_size == 0:
+                return None
+            transcript.seek(snapshot_size - 1)
+            if transcript.read(1) != b"\n":
+                return None
+    except (FileNotFoundError, IsADirectoryError, PermissionError):
+        return None
+    for raw_line in iter_reverse_lines(session_file, end_offset=snapshot_size):
+        try:
+            record = json.loads(raw_line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict) or record.get("type") != "event_msg":
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        event_type = payload.get("type")
+        if event_type == CODEX_TURN_STARTED_EVENT:
+            return SUBMIT_ACTIVITY_ACTIVE
+        if event_type == CODEX_TURN_COMPLETE_EVENT:
+            return SUBMIT_ACTIVITY_IDLE
+    return None
+
+
+def require_codex_submit_activity(session_file: Path) -> str:
+    activity = derive_codex_submit_activity(session_file)
+    if activity is None:
+        raise CodexTurnStateUnknown(
+            "cannot choose a safe Codex pane submit key: no trustworthy "
+            f"{CODEX_TURN_STARTED_EVENT}/{CODEX_TURN_COMPLETE_EVENT} turn-boundary "
+            f"event was found in {session_file}; refusing to guess the key from "
+            "transcript freshness"
+        )
+    return activity
+
+
+def codex_submit_byte(activity: str) -> str:
+    """Tab enqueues to the next turn, Enter submits now — one place, brand-keyed.
+
+    Shared by routing and by the pre-key refresh so that the two cannot drift.
+    """
+    if activity == SUBMIT_ACTIVITY_ACTIVE:
+        return CODEX_PANE_QUEUE_BYTE
+    if activity == SUBMIT_ACTIVITY_IDLE:
+        return PANE_ENTER_BYTE
+    raise RegistryError(f"unknown Codex submit activity: {activity!r}")
+
+
 # --- Capability-based routing (transport-neutral) -----------------------------
 
 
@@ -787,6 +1048,7 @@ def build_pane_route(
     transports: dict[str, Callable[[], PaneTransport]] | None = None,
     preflight: bool = True,
     observe_addressing: bool = False,
+    codex_submit_activity: str | None = None,
 ) -> DeliveryRoute:
     """Route to a live pane using only capability questions.
 
@@ -794,6 +1056,12 @@ def build_pane_route(
     "is a transport registered for this pane_ref", "is that transport usable",
     "does the addressed pane exist" (rule 5). Which multiplexer answers them is
     the registry's business.
+
+    ``codex_submit_activity`` must already have been derived by the caller, and
+    the refusal below must stay *before* the existence probe: the probe is a pane
+    command (it moves the focus), so deriving or re-deriving the turn state here
+    would destroy the "zero pane commands" property that
+    ``pre-injection-rejected`` claims.
     """
     pane_ref = target.pane_ref
     assert pane_ref is not None
@@ -828,6 +1096,17 @@ def build_pane_route(
                 "explicitly with --allow-resume"
             ),
         )
+    # Last check before the first pane command. Structural route failures above
+    # take precedence (their remedy is "repair the route", not "read the state
+    # again"), but this one must stay ahead of the probe, which moves the focus.
+    if target.brand == "codex" and codex_submit_activity not in {
+        SUBMIT_ACTIVITY_ACTIVE,
+        SUBMIT_ACTIVITY_IDLE,
+    }:
+        raise CodexTurnStateUnknown(
+            "Codex pane routing requires an independently derived submit "
+            f"activity; got {codex_submit_activity!r}"
+        )
     transport.observe_addressing = observe_addressing
     probe: Capability | None = None
     if preflight:
@@ -842,9 +1121,11 @@ def build_pane_route(
                     "silently swallowed with exit status 0 and empty output"
                 ),
             )
+    # Brand-keyed, and for Codex keyed on the *derived turn activity* rather than
+    # on the reachability state: the latter is only "recently addressable".
     submit_byte = (
-        CODEX_PANE_QUEUE_BYTE
-        if target.brand == "codex" and target.state == "active"
+        codex_submit_byte(codex_submit_activity)
+        if target.brand == "codex"
         else PANE_ENTER_BYTE
     )
     return DeliveryRoute(
@@ -854,6 +1135,8 @@ def build_pane_route(
         pane_ref=pane_ref,
         pane_text=" ".join(envelope.splitlines()),
         submit_byte=submit_byte,
+        paste_framed=target.brand in PASTE_FRAMED_BRANDS,
+        submit_activity=codex_submit_activity,
         preflight=probe,
     )
 
@@ -936,6 +1219,7 @@ def build_route(
     allow_resume: bool = False,
     preflight: bool = True,
     observe_addressing: bool = False,
+    codex_submit_activity: str | None = None,
     which: Callable[[str], str | None] = shutil.which,
 ) -> DeliveryRoute:
     """Pick a route from capabilities alone, or fail closed.
@@ -953,6 +1237,7 @@ def build_route(
                 transports=transports,
                 preflight=preflight,
                 observe_addressing=observe_addressing,
+                codex_submit_activity=codex_submit_activity,
             )
         except NoOperationalRoute as pane_failure:
             if not allow_resume:
@@ -1061,6 +1346,16 @@ def plan_delivery(
         raise RegistryError(f"unsupported sender brand: {sender.brand!r}")
     target_state = derive_effective_state(target)
     routed_target = target._replace(state=target_state["effective_state"])
+    # Derived here, before build_route runs anything: build_route's pane branch
+    # probes the pane (a focus command), so an unreadable turn state has to be
+    # refused while the "zero pane commands" claim is still true.
+    codex_submit_activity: str | None = None
+    if (
+        target.brand == "codex"
+        and target.pane_ref is not None
+        and target_state["effective_state"] in {"active", "idle"}
+    ):
+        codex_submit_activity = require_codex_submit_activity(target.session_file)
     envelope = build_envelope(
         sender, target, message, nonce=nonce, script_path=script_path
     )
@@ -1071,6 +1366,7 @@ def plan_delivery(
         allow_resume=allow_resume,
         preflight=preflight,
         observe_addressing=observe_addressing,
+        codex_submit_activity=codex_submit_activity,
         which=which,
     )
     payload = {
@@ -1082,6 +1378,9 @@ def plan_delivery(
         "target_session_id": target.session_id,
         "target_declared_state": target.state,
         "target_effective_state": target_state["effective_state"],
+        # Reachability (above) and current turn activity (here) are separate
+        # answers on purpose; None means "not applicable to this target/route".
+        "target_submit_activity": codex_submit_activity,
         "target_state_diagnostic": target_state["diagnostic"],
         "target_session_file": str(target.session_file),
         "nonce": nonce,
@@ -1091,6 +1390,7 @@ def plan_delivery(
         "submit_argv": route.submit_argv(),
         "route_mode": route.mode,
         "pane_transport": route.transport.name if route.transport else None,
+        "pane_paste_framed": route.paste_framed if route.mode == ROUTE_PANE else None,
         "pane_preflight": (
             route.preflight.detail
             if route.preflight is not None
@@ -1269,7 +1569,16 @@ def create_parser() -> argparse.ArgumentParser:
     send.add_argument("--from", dest="sender", required=True)
     send.add_argument("--to", dest="target", required=True)
     send.add_argument("--message", required=True)
-    send.add_argument("--timeout", type=float, default=120.0)
+    send.add_argument(
+        "--timeout",
+        type=float,
+        default=120.0,
+        help=(
+            "seconds a single pane command may take. For the resume transport it "
+            "bounds only how long delivery is OBSERVED: that runner carries the "
+            "target's whole turn and is never terminated by this process"
+        ),
+    )
     send.add_argument(
         "--observation-log",
         type=Path,
@@ -1380,6 +1689,79 @@ def append_observation(record: dict[str, Any], log_path: Path | None) -> None:
         )
 
 
+PANE_OUTCOME_WARNINGS: dict[str, str] = {
+    DELIVERY_COMPOSER_UNSUBMITTED: (
+        "the envelope text was written to the pane, but the target's turn state "
+        "became unreadable before a submit key could be chosen; NO key was sent, "
+        "so the envelope is sitting unsubmitted in the composer — recover that "
+        "existing text instead of rewriting the envelope"
+    ),
+    DELIVERY_WRITE_UNVERIFIED: (
+        "the pane write command did not report back (timeout); it may still have "
+        "typed part or all of the envelope, so this is neither delivery evidence "
+        "nor proof of zero side effects — inspect the target, do not resend"
+    ),
+    DELIVERY_SUBMIT_COMMAND_UNVERIFIED: (
+        "the envelope text was written but the submit-key command failed or did "
+        "not report back; the envelope may be sitting unsubmitted in the target's "
+        "input box, and a blind resend can duplicate it — inspect the target (and "
+        "rebuild its pane_ref if the failure was an addressing error) first"
+    ),
+    DELIVERY_SUBMIT_UNVERIFIED: (
+        "the pane transport reported no addressing error, but this envelope nonce "
+        "was not found in the target transcript; command success is not delivery "
+        "evidence, so the envelope may still be sitting in the input box — inspect "
+        "the target or seek an explicit peer reply, and do not blindly resend"
+    ),
+    DELIVERY_QUEUED_FOR_NEXT_TURN: (
+        "the enqueue key was executed while the target was mid-turn, so this "
+        "envelope's nonce cannot appear until that turn ends; an early transcript "
+        "miss is NOT non-delivery evidence — wait for the turn boundary, never "
+        "resend the enqueue key"
+    ),
+}
+
+
+def pane_result_payload(
+    delivery: str,
+    payload: dict[str, Any],
+    transport: PaneTransport,
+    *,
+    submit_action: str,
+    submit_activity: str | None,
+    delivered: bool,
+    sent: bool,
+    submit_rejected: str | None = None,
+) -> dict[str, Any]:
+    """One structured pane outcome, named after the action that was executed."""
+    recommended_action, verification_guidance = OUTCOME_GUIDANCE[delivery]
+    return {
+        "delivery": delivery,
+        "route_mode": ROUTE_PANE,
+        "pane_transport": transport.name,
+        # Measured focus cost of *this* delivery (see INTRUSION_*), reported on
+        # success too: the question is a rate, not an incident. Deliberately an
+        # event, never a summary -- see OBSERVATION_LOG_DEFAULT for why a ratio
+        # computed here would be systematically wrong.
+        "addressing_intrusion": transport.addressing_intrusion(),
+        "addressing_observation": transport.addressing_observation(),
+        "target": payload["target"],
+        "target_brand": payload["target_brand"],
+        "target_effective_state": payload.get("target_effective_state"),
+        "target_submit_activity": submit_activity,
+        "submit_action": submit_action,
+        "recommended_action": recommended_action,
+        "verification_guidance": verification_guidance,
+        "nonce": payload["nonce"],
+        "evidence": "envelope-nonce-found" if delivered else "none",
+        "sent": sent,
+        "retry_safe": delivery in RETRY_SAFE_OUTCOMES,
+        "transport_exit_status_trusted": False,
+        "submit_rejected": submit_rejected,
+        "acknowledged": False,
+    }
+
+
 def send_via_pane(
     route: DeliveryRoute,
     payload: dict[str, Any],
@@ -1394,136 +1776,218 @@ def send_via_pane(
     a live session with a dead pane answers rc=0 with empty output, so a clean
     invocation proves nothing. Rejections are recognised from command *text*; the
     only positive evidence is the per-send nonce appearing in the transcript.
+
+    Every exit from here is classified by the action that was actually executed
+    (rule 4), because the correct caller behaviour differs per action: wait out a
+    turn boundary, recover an unsubmitted composer, or inspect a command that
+    never reported back. One shared "unverified" value made those indistinguishable.
     """
     transport = route.transport
     assert transport is not None and route.pane_ref is not None
     assert route.pane_text is not None and route.submit_byte is not None
     session_file = Path(payload["target_session_file"])
     boundary = transcript_size(session_file)
-    submit_rejection: str | None = None
-    delivered = False
+    target_is_codex = payload["target_brand"] == "codex"
+    submit_activity = payload.get("target_submit_activity")
+
+    def report(
+        delivery: str,
+        *,
+        submit_action: str,
+        delivered: bool = False,
+        sent: bool = True,
+        submit_rejected: str | None = None,
+        activity: str | None = None,
+        status: int = 0,
+    ) -> int:
+        result = pane_result_payload(
+            delivery,
+            payload,
+            transport,
+            submit_action=submit_action,
+            submit_activity=activity if activity is not None else submit_activity,
+            delivered=delivered,
+            sent=sent,
+            submit_rejected=submit_rejected,
+        )
+        warning = PANE_OUTCOME_WARNINGS.get(delivery)
+        if warning is not None:
+            print(f"warning: {warning}", file=sys.stderr)
+        print(json.dumps(result, ensure_ascii=False))
+        append_observation(
+            {
+                "observed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "nonce": payload["nonce"],
+                "delivery": result["delivery"],
+                "intrusion": transport.addressing_intrusion(),
+                "target_pane": dict(route.pane_ref or {}),
+                **transport.addressing_observation(),
+            },
+            observation_log,
+        )
+        return status
 
     try:
         injected = transport.write_chars(
-            route.pane_ref, route.pane_text, cwd=route.cwd, timeout=timeout
+            route.pane_ref,
+            route.pane_text,
+            paste_framed=route.paste_framed,
+            cwd=route.cwd,
+            timeout=timeout,
         )
-        echo_transport_output(injected)
-        if injected.rejected:
-            raise NoOperationalRoute(
-                "pane-injection-rejected",
-                injected.detail,
-                remedy=(
-                    "rebuild the target's pane_ref entirely (a renamed session or "
-                    "closed pane rots the whole handle) and send again — nothing "
-                    "was injected"
-                ),
-            )
+    except subprocess.TimeoutExpired:
+        # The write command never came back, so it is unknown whether any bytes
+        # reached the composer. Not "nothing was sent": a command that failed to
+        # report does not prove the absence of side effects.
+        return report(
+            DELIVERY_WRITE_UNVERIFIED,
+            submit_action="none-write-command-unverified",
+            status=EXIT_UNCERTAIN_DELIVERY,
+        )
+    echo_transport_output(injected)
+    if injected.rejected:
+        raise NoOperationalRoute(
+            "pane-injection-rejected",
+            injected.detail,
+            remedy=(
+                "rebuild the target's pane_ref entirely (a renamed session or "
+                "closed pane rots the whole handle) and send again — nothing "
+                "was injected"
+            ),
+        )
 
-        if submit_delay is None:
-            submit_delay = (
-                CODEX_PANE_SUBMIT_DELAY_SECONDS
-                if payload["target_brand"] == "codex"
-                else 0.0
-            )
-        if submit_delay:
-            time.sleep(submit_delay)
-        submitted = transport.send_key(
-            route.pane_ref, route.submit_byte, cwd=route.cwd, timeout=timeout
+    if submit_delay is None:
+        submit_delay = (
+            CODEX_PANE_SUBMIT_DELAY_SECONDS if target_is_codex else 0.0
         )
-        echo_transport_output(submitted)
-        if submitted.rejected:
-            # The envelope text already went out, so this is not "nothing was
-            # sent"; it is a send whose delivery cannot be proven.
-            submit_rejection = submitted.detail
-        else:
-            # Rule 2: an enqueue key must never be resent (it would enqueue a
-            # duplicate envelope). Only a plain submit may be retried. This is
-            # derived *before* verification because it also selects the window:
-            # a queued envelope cannot surface until the turn ends, so waiting
-            # out the full window would be pure idling.
-            enqueued_for_next_turn = (
-                payload["target_brand"] == "codex"
-                and payload["target_effective_state"] == "active"
-            )
-            verify_window = (
-                PANE_VERIFY_QUEUED_WINDOW_SECONDS
-                if enqueued_for_next_turn
-                else PANE_VERIFY_WINDOW_SECONDS
-            )
-            delivered = wait_for_transcript_marker(
-                session_file, payload["delivery_marker"], boundary, verify_window
-            )
-            if not delivered and not enqueued_for_next_turn:
-                time.sleep(max(submit_delay, PANE_VERIFY_POLL_INITIAL_SECONDS))
-                submitted = transport.send_key(
-                    route.pane_ref, route.submit_byte, cwd=route.cwd, timeout=timeout
-                )
-                echo_transport_output(submitted)
-                if submitted.rejected:
-                    submit_rejection = submitted.detail
-                else:
-                    delivered = wait_for_transcript_marker(
-                        session_file,
-                        payload["delivery_marker"],
-                        boundary,
-                        verify_window,
-                    )
-    except subprocess.TimeoutExpired as exc:
-        raise RegistryError(
-            "delivery attempt timed out; the target may still have queued the message"
-        ) from exc
+    if submit_delay:
+        time.sleep(submit_delay)
 
-    if submit_rejection is not None:
-        print(
-            "warning: the envelope text was injected but the submit key was "
-            f"rejected ({submit_rejection}); the envelope may be sitting "
-            "unsubmitted in the target's input box, so this is not delivery "
-            "evidence and a blind resend can duplicate it — rebuild the target's "
-            "pane_ref and inspect the target before retrying",
-            file=sys.stderr,
-        )
-    elif not delivered:
-        print(
-            "warning: the pane transport reported no addressing error, but this "
-            "envelope nonce was not found in the target transcript; command "
-            "success is not delivery evidence, so the message may still be queued "
-            "or sitting in the input box — retry when the target is idle or seek "
-            "an explicit peer reply",
-            file=sys.stderr,
-        )
-    result = {
-        "delivery": DELIVERY_DELIVERED if delivered else DELIVERY_QUEUED_UNVERIFIED,
-        "route_mode": ROUTE_PANE,
-        "pane_transport": transport.name,
-        # Measured focus cost of *this* delivery (see INTRUSION_*), reported on
-        # success too: the question is a rate, not an incident. Deliberately an
-        # event, never a summary -- see OBSERVATION_LOG_DEFAULT for why a ratio
-        # computed here would be systematically wrong.
-        "addressing_intrusion": transport.addressing_intrusion(),
-        "addressing_observation": transport.addressing_observation(),
-        "target": payload["target"],
-        "target_brand": payload["target_brand"],
-        "nonce": payload["nonce"],
-        "evidence": "envelope-nonce-found" if delivered else "none",
-        "sent": True,
-        "retry_safe": False,
-        "transport_exit_status_trusted": False,
-        "submit_rejected": submit_rejection,
-        "acknowledged": False,
-    }
-    print(json.dumps(result, ensure_ascii=False))
-    append_observation(
-        {
-            "observed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-            "nonce": payload["nonce"],
-            "delivery": result["delivery"],
-            "intrusion": transport.addressing_intrusion(),
-            "target_pane": dict(route.pane_ref),
-            **transport.addressing_observation(),
-        },
-        observation_log,
+    submit_byte = route.submit_byte
+    if target_is_codex:
+        # Refresh immediately before the key: the turn may have ended during the
+        # settle delay, and then the planned Tab would land in an idle composer
+        # and enqueue nothing. Unknown here is NOT a licence to guess — the text
+        # is already in the composer, so the honest outcome is to send no key.
+        submit_activity = derive_codex_submit_activity(session_file)
+        if submit_activity is None:
+            return report(
+                DELIVERY_COMPOSER_UNSUBMITTED,
+                submit_action="none-post-write-unknown",
+                status=EXIT_UNCERTAIN_DELIVERY,
+            )
+        submit_byte = codex_submit_byte(submit_activity)
+
+    # Rule 2: an enqueue key must never be resent (it would enqueue a duplicate
+    # envelope). Only a plain submit may be retried. Derived before verification
+    # because it also selects the window: a queued envelope cannot surface until
+    # the turn ends, so waiting out the full window would be pure idling.
+    enqueued_for_next_turn = (
+        target_is_codex and submit_activity == SUBMIT_ACTIVITY_ACTIVE
     )
-    return 0
+    submit_action = "tab-queue" if enqueued_for_next_turn else "enter-submit"
+    verify_window = (
+        PANE_VERIFY_QUEUED_WINDOW_SECONDS
+        if enqueued_for_next_turn
+        else PANE_VERIFY_WINDOW_SECONDS
+    )
+
+    try:
+        submitted = transport.send_key(
+            route.pane_ref, submit_byte, cwd=route.cwd, timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        return report(
+            DELIVERY_SUBMIT_COMMAND_UNVERIFIED,
+            submit_action=submit_action,
+            status=EXIT_UNCERTAIN_DELIVERY,
+        )
+    echo_transport_output(submitted)
+    if submitted.rejected:
+        # The envelope text already went out, so this is not "nothing was sent";
+        # it is a send whose delivery cannot be proven.
+        return report(
+            DELIVERY_SUBMIT_COMMAND_UNVERIFIED,
+            submit_action=submit_action,
+            submit_rejected=submitted.detail,
+            status=EXIT_UNCERTAIN_DELIVERY,
+        )
+
+    delivered = wait_for_transcript_marker(
+        session_file, payload["delivery_marker"], boundary, verify_window
+    )
+    if delivered:
+        return report(DELIVERY_DELIVERED, submit_action=submit_action, delivered=True)
+    if enqueued_for_next_turn:
+        return report(DELIVERY_QUEUED_FOR_NEXT_TURN, submit_action=submit_action)
+
+    time.sleep(max(submit_delay, PANE_VERIFY_POLL_INITIAL_SECONDS))
+    if target_is_codex:
+        # A second Enter is only safe while the target is still idle: if the turn
+        # has started, Enter would steer it, and unknown could be either.
+        submit_activity = derive_codex_submit_activity(session_file)
+        if submit_activity != SUBMIT_ACTIVITY_IDLE:
+            return report(DELIVERY_SUBMIT_UNVERIFIED, submit_action=submit_action)
+    try:
+        submitted = transport.send_key(
+            route.pane_ref, submit_byte, cwd=route.cwd, timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        return report(
+            DELIVERY_SUBMIT_COMMAND_UNVERIFIED,
+            submit_action=submit_action,
+            status=EXIT_UNCERTAIN_DELIVERY,
+        )
+    echo_transport_output(submitted)
+    if submitted.rejected:
+        return report(
+            DELIVERY_SUBMIT_COMMAND_UNVERIFIED,
+            submit_action=submit_action,
+            submit_rejected=submitted.detail,
+            status=EXIT_UNCERTAIN_DELIVERY,
+        )
+    delivered = wait_for_transcript_marker(
+        session_file, payload["delivery_marker"], boundary, verify_window
+    )
+    if delivered:
+        return report(DELIVERY_DELIVERED, submit_action=submit_action, delivered=True)
+    return report(DELIVERY_SUBMIT_UNVERIFIED, submit_action=submit_action)
+
+
+def observe_detached_resume(
+    process: subprocess.Popen,
+    path: Path,
+    marker: str,
+    start_offset: int,
+    window_seconds: float,
+    *,
+    monotonic=time.monotonic,
+    sleep=time.sleep,
+) -> tuple[bool, int | None]:
+    """Watch for the nonce without ever owning the resumed turn's lifetime.
+
+    Returns ``(delivered, runner_returncode)`` where a ``None`` return code means
+    the runner is still working. Never terminates the runner: the window bounds
+    only this process's *observation*.
+    """
+    deadline = monotonic() + max(0.0, window_seconds)
+    delay = PANE_VERIFY_POLL_INITIAL_SECONDS
+    while True:
+        if transcript_contains_marker(path, marker, start_offset):
+            return True, process.poll()
+        returncode = process.poll()
+        if returncode is not None:
+            # The transcript append can race the process exit, so take one final
+            # message-specific reading before calling it unverified.
+            return (
+                transcript_contains_marker(path, marker, start_offset),
+                returncode,
+            )
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return False, None
+        sleep(min(delay, PANE_VERIFY_POLL_MAX_SECONDS, remaining))
+        delay = min(delay * 2, PANE_VERIFY_POLL_MAX_SECONDS)
 
 
 def send_via_resume(
@@ -1532,6 +1996,22 @@ def send_via_resume(
     *,
     timeout: float | None,
 ) -> int:
+    """Start the resume transport detached, then observe without owning it.
+
+    The resume process is not a bounded "write this message" command: it carries
+    the target's entire turn. Running it under this process's timeout therefore
+    made the sender's patience the target's deadline — a sender-side timeout
+    SIGKILLed the runner and aborted a turn that was working correctly, possibly
+    after it had already written files or called out to other systems. So the
+    runner is started in its own process session and is never terminated here;
+    ``timeout`` bounds only how long this process watches for the nonce.
+
+    Its output is captured to a private file rather than to a pipe. A pipe would
+    reintroduce the same class of bug in a quieter form: an abandoned runner whose
+    pipe buffer filled would block *inside the target's turn*. Discarding the
+    output instead would silently drop the target's reply, which for the
+    claude-code shape is the only place that reply ever appears.
+    """
     assert route.argv is not None
     session_file = Path(payload["target_session_file"])
     if session_file.is_file() and session_file.stat().st_size >= LARGE_TRANSCRIPT_BYTES:
@@ -1540,27 +2020,93 @@ def send_via_resume(
             "resume may be expensive because it loads the target context",
             file=sys.stderr,
         )
+    boundary = transcript_size(session_file)
+    handle, capture_name = tempfile.mkstemp(prefix="agenttui-resume-", suffix=".log")
+    capture_path = Path(capture_name)
     try:
-        result = run_command(route.argv, cwd=route.cwd, timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        raise RegistryError(
-            "delivery attempt timed out; the target may still have queued the message"
-        ) from exc
-    if result.stdout:
-        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
-    if result.stderr:
+        with os.fdopen(handle, "wb") as capture:
+            process = subprocess.Popen(
+                route.argv,
+                cwd=route.cwd,
+                stdin=subprocess.DEVNULL,
+                stdout=capture,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+    except OSError as exc:
+        capture_path.unlink(missing_ok=True)
+        raise RegistryError(f"failed to start the resume transport: {exc}") from exc
+
+    window = RESUME_VERIFY_WINDOW_SECONDS
+    if timeout is not None:
+        window = min(window, timeout)
+    delivered, runner_returncode = observe_detached_resume(
+        process, session_file, payload["delivery_marker"], boundary, window
+    )
+
+    still_running = runner_returncode is None
+    if delivered:
+        delivery = DELIVERY_DELIVERED
+    elif still_running:
+        delivery = DELIVERY_RESUME_STARTED_UNVERIFIED
+    else:
+        delivery = DELIVERY_RESUME_EXITED_UNVERIFIED
+    recommended_action, verification_guidance = OUTCOME_GUIDANCE[delivery]
+
+    captured = ""
+    if not still_running:
+        # Safe to read and clean up only once the writer is gone.
+        captured = capture_path.read_text(encoding="utf-8", errors="replace")
+        capture_path.unlink(missing_ok=True)
+        if captured:
+            print(captured, end="" if captured.endswith("\n") else "\n")
+    if still_running:
         print(
-            result.stderr,
+            "warning: the resume runner is still working and this envelope nonce "
+            "has not appeared yet; it was NOT terminated, so do not resend — its "
+            f"output is being written to {capture_path}",
             file=sys.stderr,
-            end="" if result.stderr.endswith("\n") else "\n",
         )
-    if result.returncode != 0:
+    elif not delivered:
         print(
-            "warning: the delivery command returned non-zero; delivery is uncertain, "
-            "not proven failed (busy sessions may queue the message)",
+            "warning: the resume runner exited before this envelope nonce "
+            "appeared; a runner exit does not prove the target had no side "
+            "effects, so inspect the target instead of blindly resending",
             file=sys.stderr,
         )
-    return result.returncode
+    print(
+        json.dumps(
+            {
+                "delivery": delivery,
+                "route_mode": ROUTE_RESUME,
+                "target": payload["target"],
+                "target_brand": payload["target_brand"],
+                "target_effective_state": payload.get("target_effective_state"),
+                "submit_action": "detached-resume",
+                "recommended_action": recommended_action,
+                "verification_guidance": verification_guidance,
+                "nonce": payload["nonce"],
+                "evidence": "envelope-nonce-found" if delivered else "none",
+                "sent": True,
+                "retry_safe": delivery in RETRY_SAFE_OUTCOMES,
+                "execution_lifecycle": "detached-from-sender",
+                "runner_pid": process.pid,
+                "runner_state": "running" if still_running else "exited",
+                "runner_returncode": runner_returncode,
+                "runner_output_path": str(capture_path) if still_running else None,
+                # Delivery is transport entry. Whether the target's turn ran to
+                # completion is a different question, and this process no longer
+                # owns the turn, so it must not be implied either way.
+                "task_completion": "unverified",
+                "target_turn_outcome": "not-observed",
+                "acknowledged": False,
+            },
+            ensure_ascii=False,
+        )
+    )
+    if delivered or still_running:
+        return 0
+    return EXIT_UNCERTAIN_DELIVERY
 
 
 def command_send(args: argparse.Namespace, repo: Path) -> int:
@@ -1658,8 +2204,35 @@ def main(argv: list[str] | None = None) -> int:
             return command_state(args, repo, "stopped")
         if args.command == "status":
             return command_status(args, repo)
+    except CodexTurnStateUnknown as exc:
+        # Structured, non-zero, and mechanically zero pane commands: this refusal
+        # is raised while planning, before the existence probe (itself a pane
+        # command) can run, which is what makes retry_safe=true true here.
+        recommended_action, verification_guidance = OUTCOME_GUIDANCE[
+            DELIVERY_PRE_INJECTION_REJECTED
+        ]
+        print(
+            json.dumps(
+                {
+                    "delivery": DELIVERY_PRE_INJECTION_REJECTED,
+                    "route_mode": ROUTE_PANE,
+                    "detail": str(exc),
+                    "submit_action": "none-pre-injection",
+                    "recommended_action": recommended_action,
+                    "verification_guidance": verification_guidance,
+                    "sent": False,
+                    "retry_safe": DELIVERY_PRE_INJECTION_REJECTED
+                    in RETRY_SAFE_OUTCOMES,
+                    "evidence": "none",
+                    "acknowledged": False,
+                },
+                ensure_ascii=False,
+            )
+        )
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_PRE_INJECTION_REJECTED
     except NoOperationalRoute as exc:
-        # Structured, non-zero, and never conflated with queued-unverified.
+        # Structured, non-zero, and never conflated with a *-unverified outcome.
         print(json.dumps(exc.payload(), ensure_ascii=False), file=sys.stdout)
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_NO_OPERATIONAL_ROUTE

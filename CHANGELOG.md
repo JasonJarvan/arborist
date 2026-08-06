@@ -5,6 +5,61 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
 
 ## [Unreleased]
 
+### Changed
+- **Pane reachability and current Codex turn activity are now two separate readings**
+  (`agenttui.py` `derive_codex_submit_activity` / `build_pane_route`, `agenttui-registry.md` §3 rule 1,
+  ADR-0007 Amendment 3, +12 tests) — the submit key used to be chosen from the *reachability* state, which
+  is derived from transcript freshness. Freshness answers "is this pane worth addressing"; it does not
+  answer "is a turn running right now", and a target whose turn has just finished is still inside the
+  freshness window. A downstream adopter measured both directions: Tab handed to an idle composer enqueues
+  nothing and leaves the envelope sitting unsubmitted, and conversely a genuinely busy target's Tab queue
+  does not surface in the transcript until the turn ends, so an early grep miss read as failure and
+  provoked a duplicate decision. The key is now derived from the target's own latest complete turn-boundary
+  event (`task_started` → Tab, `task_complete` → Enter), refreshed once more immediately before the key
+  because the turn can end during the settle delay, and an unterminated JSONL tail is treated as unknown
+  rather than skipped — skipping it would confidently report the state from *before* the record currently
+  being written. No trustworthy boundary means the send is refused before the first pane command rather
+  than guessed. Claude Code is untouched: still Enter unconditionally, still no boundary read, because its
+  Tab is autocomplete and its own receiver-side queue handles a busy turn.
+- **Delivery outcomes are classified by the action that was executed, replacing the single
+  `queued-unverified` bucket** (`agenttui.py` `OUTCOME_GUIDANCE` / `RETRY_SAFE_OUTCOMES` /
+  `send_via_pane`, `agenttui-registry.md` §3 rule 4, +14 tests) — the problem was not the name but the
+  merge: "wait out a turn boundary", "recover text already sitting in the composer" and "go inspect a
+  command that never reported back" are opposite caller actions that shared one reading, so a caller could
+  not tell which one it had. Pane results are now `pre-injection-rejected` / `delivered` /
+  `queued-for-next-turn` / `submit-unverified` / `composer-unsubmitted` / `write-unverified` /
+  `submit-command-unverified`, each carrying `submit_action`, `recommended_action`,
+  `verification_guidance` and `retry_safe`. `retry_safe=true` is confined to the two paths where zero pane
+  commands are mechanically provable (`pre-injection-rejected`, `no-operational-route`) and a test pins
+  that set — a command that failed or timed out does **not** prove the absence of side effects.
+  `no-operational-route` keeps its exit status 3 and stays strictly "nothing was sent". Honest boundary,
+  stated in the guide: this splits **actions**, not **causes** — an authentication failure and a truncated
+  composer still share `submit-unverified`, and no screen-dump classifier exists yet.
+- **A Codex envelope is written as one bracketed-paste burst instead of a keystroke stream**
+  (`PaneTransport.frame_paste` / `PASTE_FRAMED_BRANDS`, `agenttui-registry.md` §3 rule 1, +7 tests) —
+  measured downstream on one Codex version: an unframed fast character stream is classified as a paste
+  burst, and Enter is then consumed as a newline *inside* that burst, so a mechanically idle target with
+  two submit commands both returning 0 still had the envelope sitting in its composer. This is the causal
+  fix for the *write method* half of shape 3 and nothing more: routing, transport selection and the command
+  sequence are unchanged (one write command, same verb, same addressing — only the payload is wrapped).
+  The intent ("deliver as a single paste") is a capability question asked by the routing layer; the escape
+  bytes appear only inside the transport, pinned by a mechanical test. Enabled per brand from measurement
+  only, so Claude Code stays unframed — same name is not the same capability.
+- **The resume runner is detached and is never killed by the sender's timeout**
+  (`agenttui.py` `send_via_resume` / `observe_detached_resume`, `agenttui-registry.md` §3 rule 7,
+  ADR-0007 Amendment 3, +11 tests) — `claude -p --resume` and `codex exec resume` carry the target's whole
+  turn, so running them under this process's timeout made the sender's patience the target's deadline: an
+  observation timeout SIGKILLed a runner that was working correctly, aborting a turn that may already have
+  written files or called external systems. This is orthogonal to resume having become explicit opt-in —
+  opt-in changed *who chooses* the route, not who owns its lifetime. The runner now starts in its own
+  process session with stdin detached, `--timeout` bounds only the nonce observation window, and no code
+  path in that function can signal the runner (a test greps for it). Outcomes are `delivered` (still only
+  transport entry, so `task_completion=unverified`), `resume-started-unverified` and
+  `resume-exited-unverified`; a runner exit, even with status 0, is not proof of zero side effects. Its
+  output goes to a private file rather than a pipe — an abandoned runner whose pipe buffer filled would
+  block *inside the target's turn* — and is neither discarded (for the `-p` shape it is the only place the
+  target's reply appears) nor cleaned up while the runner is still writing; the path is reported instead.
+
 ### Added
 - **A mechanical tiebreak for cross-repo registry conflicts, because that class has no owner by
   construction** (`agenttui-registry.md` §2.2.1, `validate_agenttui_registry.py`

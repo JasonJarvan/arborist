@@ -17,6 +17,7 @@ import inspect
 import io
 import json
 import contextlib
+import subprocess
 import sys
 import unittest
 from datetime import datetime
@@ -107,7 +108,11 @@ class FakeTransport(AGENTTUI.PaneTransport):
         self._submit_outcome = submit_outcome
         self.exists_calls = 0
         self.writes: list[str] = []
+        self.framed: list[bool] = []
         self.keys: list[str] = []
+        # Raise instead of answering, to exercise the command-did-not-report paths.
+        self.write_timeout = False
+        self.submit_timeouts = 0
 
     def available(self) -> AGENTTUI.Capability:
         return AGENTTUI.Capability(self._available, "fake transport availability")
@@ -116,15 +121,19 @@ class FakeTransport(AGENTTUI.PaneTransport):
         self.exists_calls += 1
         return AGENTTUI.Capability(self._exists, "fake transport existence probe")
 
-    def write_chars_argv(self, pane_ref, text):
-        return ["fake-mux-cli", "write", pane_ref["pane_id"], text]
+    def write_chars_argv(self, pane_ref, text, *, paste_framed=False):
+        payload = self.frame_paste(text) if paste_framed else text
+        return ["fake-mux-cli", "write", pane_ref["pane_id"], payload]
 
     def send_key_argv(self, pane_ref, key_byte):
         return ["fake-mux-cli", "key", pane_ref["pane_id"], key_byte]
 
-    def write_chars(self, pane_ref, text, *, cwd=None, timeout=None):
+    def write_chars(self, pane_ref, text, *, paste_framed=False, cwd=None, timeout=None):
         self.writes.append(text)
-        argv = self.write_chars_argv(pane_ref, text)
+        self.framed.append(paste_framed)
+        argv = self.write_chars_argv(pane_ref, text, paste_framed=paste_framed)
+        if self.write_timeout:
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout or 0)
         return self._write_outcome or AGENTTUI.CommandOutcome(
             argv=argv, returncode=0, stdout="", stderr="", rejected=False, detail=""
         )
@@ -132,6 +141,9 @@ class FakeTransport(AGENTTUI.PaneTransport):
     def send_key(self, pane_ref, key_byte, *, cwd=None, timeout=None):
         self.keys.append(key_byte)
         argv = self.send_key_argv(pane_ref, key_byte)
+        if self.submit_timeouts > 0:
+            self.submit_timeouts -= 1
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout or 0)
         return self._submit_outcome or AGENTTUI.CommandOutcome(
             argv=argv, returncode=0, stdout="", stderr="", rejected=False, detail=""
         )
@@ -161,6 +173,22 @@ def make_record(
         spec_path=base / "spec.json",
         runtime_path=base / "runtime.json",
     )
+
+
+def append_codex_boundary(session_file: Path, activity: str, *, terminated: bool = True) -> None:
+    """Append the turn-boundary record that means `activity`, fixture-only.
+
+    Shape only: the event names are contract constants, and no observed transcript
+    content, session id, or path appears here.
+    """
+    event = (
+        AGENTTUI.CODEX_TURN_STARTED_EVENT
+        if activity == "active"
+        else AGENTTUI.CODEX_TURN_COMPLETE_EVENT
+    )
+    line = json.dumps({"type": "event_msg", "payload": {"type": event}})
+    with session_file.open("a", encoding="utf-8") as stream:
+        stream.write(line + ("\n" if terminated else ""))
 
 
 def pane_ref(multiplexer: str = FAKE_MUX) -> dict[str, str]:
@@ -193,15 +221,25 @@ class TransportDecouplingTests(unittest.TestCase):
         target = make_record(pane_ref=pane_ref())
 
         route = AGENTTUI.build_route(
-            target, "envelope", transports={FAKE_MUX: lambda: transport}
+            target,
+            "envelope",
+            transports={FAKE_MUX: lambda: transport},
+            codex_submit_activity="idle",
         )
 
         self.assertEqual(AGENTTUI.ROUTE_PANE, route.mode)
         self.assertIs(transport, route.transport)
         self.assertEqual(1, transport.exists_calls)
-        # The command line comes from the transport, not from the router.
+        # The command line comes from the transport, not from the router. Codex
+        # targets are paste-framed, which is also a transport-side decision.
         self.assertEqual(
-            ["fake-mux-cli", "write", PANE_ID, "envelope"], route.pane_argv()
+            [
+                "fake-mux-cli",
+                "write",
+                PANE_ID,
+                transport.frame_paste("envelope"),
+            ],
+            route.pane_argv(),
         )
 
     def test_routing_functions_name_no_concrete_multiplexer(self) -> None:
@@ -238,7 +276,10 @@ class ExistencePreflightTests(unittest.TestCase):
 
         with self.assertRaises(AGENTTUI.NoOperationalRoute) as caught:
             AGENTTUI.build_route(
-                target, "envelope", transports={"zellij": lambda: transport}
+                target,
+                "envelope",
+                transports={"zellij": lambda: transport},
+                codex_submit_activity="idle",
             )
 
         self.assertEqual("pane-not-reachable", caught.exception.reason)
@@ -381,12 +422,12 @@ class SilentInjectionTests(unittest.TestCase):
 
         _status, result, warnings = self.run_pane_send(transport)
 
-        self.assertEqual(AGENTTUI.DELIVERY_QUEUED_UNVERIFIED, result["delivery"])
+        self.assertEqual(AGENTTUI.DELIVERY_SUBMIT_UNVERIFIED, result["delivery"])
         self.assertEqual("none", result["evidence"])
         self.assertFalse(result["transport_exit_status_trusted"])
         self.assertIn("not delivery evidence", warnings)
 
-    def test_rejected_submit_after_injection_is_queued_unverified_not_unsent(self) -> None:
+    def test_rejected_submit_after_injection_is_unverified_not_unsent(self) -> None:
         # Bytes already left this process, so "nothing was sent" would be a lie;
         # a blind resend could duplicate the envelope (rule 2).
         rejected = AGENTTUI.CommandOutcome(
@@ -399,12 +440,15 @@ class SilentInjectionTests(unittest.TestCase):
         )
         transport = FakeTransport(submit_outcome=rejected)
 
-        _status, result, warnings = self.run_pane_send(transport)
+        status, result, warnings = self.run_pane_send(transport)
 
-        self.assertEqual(AGENTTUI.DELIVERY_QUEUED_UNVERIFIED, result["delivery"])
+        self.assertEqual(
+            AGENTTUI.DELIVERY_SUBMIT_COMMAND_UNVERIFIED, result["delivery"]
+        )
         self.assertTrue(result["sent"])
         self.assertFalse(result["retry_safe"])
         self.assertIsNotNone(result["submit_rejected"])
+        self.assertEqual(AGENTTUI.EXIT_UNCERTAIN_DELIVERY, status)
         self.assertIn("blind resend can duplicate", warnings)
 
     def test_nonce_in_transcript_is_the_only_delivery_evidence(self) -> None:
@@ -454,6 +498,7 @@ class SendSideCapabilityTests(unittest.TestCase):
             target,
             "envelope",
             transports={FAKE_MUX: lambda: transport},
+            codex_submit_activity="idle",
             which=lambda _name: None,  # no resume CLI anywhere
         )
 
@@ -538,12 +583,64 @@ class SendSideCapabilityTests(unittest.TestCase):
 class DeliveryVocabularyTests(unittest.TestCase):
     """"Nothing was sent" and "sent but unproven" must stay distinguishable."""
 
-    def test_no_operational_route_and_queued_unverified_are_distinct_values(self) -> None:
-        self.assertNotEqual(
-            AGENTTUI.DELIVERY_NO_OPERATIONAL_ROUTE, AGENTTUI.DELIVERY_QUEUED_UNVERIFIED
-        )
+    SENT_BUT_UNPROVEN = (
+        "DELIVERY_QUEUED_FOR_NEXT_TURN",
+        "DELIVERY_SUBMIT_UNVERIFIED",
+        "DELIVERY_COMPOSER_UNSUBMITTED",
+        "DELIVERY_WRITE_UNVERIFIED",
+        "DELIVERY_SUBMIT_COMMAND_UNVERIFIED",
+        "DELIVERY_RESUME_STARTED_UNVERIFIED",
+        "DELIVERY_RESUME_EXITED_UNVERIFIED",
+    )
+
+    def test_no_operational_route_is_distinct_from_every_sent_outcome(self) -> None:
         self.assertEqual("no-operational-route", AGENTTUI.DELIVERY_NO_OPERATIONAL_ROUTE)
-        self.assertEqual("queued-unverified", AGENTTUI.DELIVERY_QUEUED_UNVERIFIED)
+        for name in self.SENT_BUT_UNPROVEN:
+            self.assertNotEqual(
+                AGENTTUI.DELIVERY_NO_OPERATIONAL_ROUTE, getattr(AGENTTUI, name), name
+            )
+
+    def test_the_single_unverified_bucket_is_gone(self) -> None:
+        # The former one-value bucket covered outcomes whose correct caller
+        # behaviour is opposite, so a caller could not tell them apart.
+        self.assertFalse(hasattr(AGENTTUI, "DELIVERY_QUEUED_UNVERIFIED"))
+
+    def test_every_outcome_names_a_caller_action(self) -> None:
+        outcomes = {
+            value
+            for name, value in vars(AGENTTUI).items()
+            if name.startswith("DELIVERY_") and isinstance(value, str)
+        }
+        # no-operational-route carries its action as `remedy` on the exception.
+        outcomes.discard(AGENTTUI.DELIVERY_NO_OPERATIONAL_ROUTE)
+
+        self.assertEqual(outcomes, set(AGENTTUI.OUTCOME_GUIDANCE))
+        for delivery, (action, guidance) in AGENTTUI.OUTCOME_GUIDANCE.items():
+            self.assertTrue(action, delivery)
+            self.assertTrue(guidance, delivery)
+
+    def test_only_provably_zero_command_outcomes_are_retry_safe(self) -> None:
+        # The hard rule: retry_safe claims "resending cannot duplicate anything",
+        # which is only mechanically true where no pane command ran at all.
+        self.assertEqual(
+            {
+                AGENTTUI.DELIVERY_NO_OPERATIONAL_ROUTE,
+                AGENTTUI.DELIVERY_PRE_INJECTION_REJECTED,
+            },
+            set(AGENTTUI.RETRY_SAFE_OUTCOMES),
+        )
+        for name in self.SENT_BUT_UNPROVEN:
+            self.assertNotIn(getattr(AGENTTUI, name), AGENTTUI.RETRY_SAFE_OUTCOMES, name)
+
+    def test_the_queued_outcome_forbids_resending_on_an_early_miss(self) -> None:
+        action, guidance = AGENTTUI.OUTCOME_GUIDANCE[
+            AGENTTUI.DELIVERY_QUEUED_FOR_NEXT_TURN
+        ]
+
+        self.assertIn("do-not-resend", action)
+        self.assertEqual(
+            "early-transcript-miss-is-not-nondelivery-evidence", guidance
+        )
 
     def test_structured_payloads_disagree_on_sent_and_retry_safe(self) -> None:
         refusal = AGENTTUI.NoOperationalRoute(
@@ -580,12 +677,17 @@ class DeliveryVocabularyTests(unittest.TestCase):
         self.assertEqual("resume-not-authorized", payload["reason"])
 
 
-def write_registry(base: Path, *, target_pane_ref: dict[str, str] | None) -> Path:
+def write_registry(
+    base: Path,
+    *,
+    target_pane_ref: dict[str, str] | None,
+    target_brand: str = "claude-code",
+) -> Path:
     """Create a minimal project repository with two registered agents."""
     repo = base / "placeholder-repo"
     (repo / ".trellis").mkdir(parents=True)
     now = datetime.now().astimezone().isoformat(timespec="seconds")
-    for name, brand, pane in ((SENDER, "codex", None), (TARGET, "claude-code", target_pane_ref)):
+    for name, brand, pane in ((SENDER, "codex", None), (TARGET, target_brand, target_pane_ref)):
         leaf = repo / ".arborist" / "agents" / name
         leaf.mkdir(parents=True)
         session_file = repo / f"{name}-session.jsonl"
@@ -796,7 +898,15 @@ class VerificationWindowTests(unittest.TestCase):
         AGENTTUI.transcript_contains_marker = fake
         return calls
 
-    def send(self, *, brand: str = "claude-code", state: str = "idle"):
+    def send(
+        self,
+        *,
+        brand: str = "claude-code",
+        state: str = "idle",
+        activity: str | None = None,
+    ):
+        if activity is not None:
+            append_codex_boundary(self.session_file, activity)
         transport = FakeTransport()
         route = AGENTTUI.DeliveryRoute(
             mode=AGENTTUI.ROUTE_PANE,
@@ -810,6 +920,7 @@ class VerificationWindowTests(unittest.TestCase):
             "target": TARGET,
             "target_brand": brand,
             "target_effective_state": state,
+            "target_submit_activity": activity,
             "target_session_file": str(self.session_file),
             "delivery_marker": f"from={SENDER} nonce={NONCE}",
             "nonce": NONCE,
@@ -850,9 +961,9 @@ class VerificationWindowTests(unittest.TestCase):
             setattr, AGENTTUI, "PANE_VERIFY_QUEUED_WINDOW_SECONDS", 1.0
         )
 
-        transport, result = self.send(brand="codex", state="active")
+        transport, result = self.send(brand="codex", state="active", activity="active")
 
-        self.assertEqual(AGENTTUI.DELIVERY_QUEUED_UNVERIFIED, result["delivery"])
+        self.assertEqual(AGENTTUI.DELIVERY_QUEUED_FOR_NEXT_TURN, result["delivery"])
         self.assertEqual(1, len(transport.keys))
 
     def test_window_is_expressed_in_seconds_and_stays_wide(self) -> None:
@@ -901,6 +1012,855 @@ class VerificationWindowTests(unittest.TestCase):
         # Backoff, not a busy loop.
         self.assertLess(len(slept), 20)
 
+
+
+class CodexSubmitActivityTests(unittest.TestCase):
+    """Reachability and current turn activity are two different questions.
+
+    Transcript freshness answers "is this pane worth addressing"; it does not
+    answer "is a turn running right now". A target whose turn just finished is
+    still inside the freshness window, so routing on freshness hands Tab to an
+    idle composer, where it enqueues nothing and the envelope sits unsubmitted.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.session_file = Path(self.temporary.name) / "target-session.jsonl"
+        self.session_file.write_text("", encoding="utf-8")
+
+    def write(self, *lines: str, terminated: bool = True) -> None:
+        text = "\n".join(lines)
+        self.session_file.write_text(
+            text + ("\n" if terminated and text else ""), encoding="utf-8"
+        )
+
+    @staticmethod
+    def event(event_type: str) -> str:
+        return json.dumps({"type": "event_msg", "payload": {"type": event_type}})
+
+    def test_latest_task_started_reads_as_active(self) -> None:
+        self.write(
+            self.event(AGENTTUI.CODEX_TURN_COMPLETE_EVENT),
+            self.event(AGENTTUI.CODEX_TURN_STARTED_EVENT),
+        )
+
+        self.assertEqual(
+            AGENTTUI.SUBMIT_ACTIVITY_ACTIVE,
+            AGENTTUI.derive_codex_submit_activity(self.session_file),
+        )
+
+    def test_latest_task_complete_reads_as_idle(self) -> None:
+        self.write(
+            self.event(AGENTTUI.CODEX_TURN_STARTED_EVENT),
+            self.event(AGENTTUI.CODEX_TURN_COMPLETE_EVENT),
+        )
+
+        self.assertEqual(
+            AGENTTUI.SUBMIT_ACTIVITY_IDLE,
+            AGENTTUI.derive_codex_submit_activity(self.session_file),
+        )
+
+    def test_an_unterminated_tail_is_unknown_not_the_previous_boundary(self) -> None:
+        # A record still being written means the state is in flux. Skipping it
+        # would confidently report the state the target was in *before* it.
+        self.write(
+            self.event(AGENTTUI.CODEX_TURN_COMPLETE_EVENT),
+            self.event(AGENTTUI.CODEX_TURN_STARTED_EVENT),
+            terminated=False,
+        )
+
+        self.assertIsNone(AGENTTUI.derive_codex_submit_activity(self.session_file))
+
+    def test_unrelated_and_malformed_records_are_skipped(self) -> None:
+        self.write(
+            self.event(AGENTTUI.CODEX_TURN_COMPLETE_EVENT),
+            "not json at all",
+            json.dumps({"type": "response_item", "payload": {"type": "message"}}),
+            json.dumps({"type": "event_msg", "payload": "not-an-object"}),
+            json.dumps({"type": "event_msg", "payload": {"type": "token_count"}}),
+        )
+
+        self.assertEqual(
+            AGENTTUI.SUBMIT_ACTIVITY_IDLE,
+            AGENTTUI.derive_codex_submit_activity(self.session_file),
+        )
+
+    def test_no_boundary_at_all_is_unknown(self) -> None:
+        self.write(json.dumps({"type": "response_item", "payload": {}}))
+
+        self.assertIsNone(AGENTTUI.derive_codex_submit_activity(self.session_file))
+
+    def test_empty_and_missing_transcripts_are_unknown(self) -> None:
+        self.write()
+        self.assertIsNone(AGENTTUI.derive_codex_submit_activity(self.session_file))
+        self.assertIsNone(
+            AGENTTUI.derive_codex_submit_activity(
+                Path(self.temporary.name) / "absent.jsonl"
+            )
+        )
+
+    def test_reverse_scan_crosses_chunk_boundaries_in_order(self) -> None:
+        self.write(*[f"line-{index}" for index in range(20)])
+
+        lines = list(AGENTTUI.iter_reverse_lines(self.session_file, chunk_size=8))
+
+        self.assertEqual(b"line-19", lines[0])
+        self.assertEqual(b"line-0", lines[-1])
+        self.assertEqual(20, len(lines))
+
+    def test_requiring_the_activity_refuses_instead_of_guessing(self) -> None:
+        self.write()
+
+        with self.assertRaises(AGENTTUI.CodexTurnStateUnknown) as caught:
+            AGENTTUI.require_codex_submit_activity(self.session_file)
+
+        self.assertIn("refusing to guess", str(caught.exception))
+
+    def test_freshness_active_but_idle_turn_routes_enter_not_tab(self) -> None:
+        # The exact downstream failure: a reachable-active Codex whose turn had
+        # completed was handed Tab, and the envelope stayed in the composer.
+        target = make_record(brand="codex", state="active", pane_ref=pane_ref())
+
+        route = AGENTTUI.build_route(
+            target,
+            "envelope",
+            transports={FAKE_MUX: lambda: FakeTransport()},
+            codex_submit_activity=AGENTTUI.SUBMIT_ACTIVITY_IDLE,
+        )
+
+        self.assertEqual(AGENTTUI.PANE_ENTER_BYTE, route.submit_byte)
+        self.assertEqual(AGENTTUI.SUBMIT_ACTIVITY_IDLE, route.submit_activity)
+
+    def test_a_running_turn_still_routes_tab(self) -> None:
+        target = make_record(brand="codex", state="active", pane_ref=pane_ref())
+
+        route = AGENTTUI.build_route(
+            target,
+            "envelope",
+            transports={FAKE_MUX: lambda: FakeTransport()},
+            codex_submit_activity=AGENTTUI.SUBMIT_ACTIVITY_ACTIVE,
+        )
+
+        self.assertEqual(AGENTTUI.CODEX_PANE_QUEUE_BYTE, route.submit_byte)
+
+    def test_claude_code_routing_never_consults_a_turn_boundary(self) -> None:
+        # Enter unconditionally, handled by its own receiver-side queue: Tab there
+        # is autocomplete, so the Codex adaptation must not be copied over.
+        target = make_record(brand="claude-code", state="active", pane_ref=pane_ref())
+
+        route = AGENTTUI.build_route(
+            target, "envelope", transports={FAKE_MUX: lambda: FakeTransport()}
+        )
+
+        self.assertEqual(AGENTTUI.PANE_ENTER_BYTE, route.submit_byte)
+        self.assertIsNone(route.submit_activity)
+
+
+class PreInjectionRejectionTests(unittest.TestCase):
+    """Unknown turn state before the first pane command: refuse, zero commands.
+
+    This is the only pane outcome allowed to claim retry_safe=true, and the claim
+    is only true if nothing — including the existence probe, which is itself a
+    focus command — has touched the pane yet.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+
+    def repo_with_unreadable_turn_state(self, *, brand: str = "codex") -> Path:
+        repo = write_registry(
+            Path(self.temporary.name), target_pane_ref=pane_ref(), target_brand=brand
+        )
+        # Fresh transcript (so the target reads as reachable) that carries no
+        # turn-boundary event at all.
+        session_file = repo / f"{TARGET}-session.jsonl"
+        session_file.write_text("transcript line\n", encoding="utf-8")
+        return repo
+
+    def test_zero_pane_commands_run_when_the_turn_state_is_unreadable(self) -> None:
+        transport = FakeTransport()
+        repo = self.repo_with_unreadable_turn_state()
+
+        with self.assertRaises(AGENTTUI.CodexTurnStateUnknown):
+            AGENTTUI.plan_delivery(
+                repo,
+                sender_name=SENDER,
+                target_name=TARGET,
+                message=MESSAGE,
+                nonce=NONCE,
+                script_path=Path("/placeholder/agenttui.py"),
+                transports={FAKE_MUX: lambda: transport},
+            )
+
+        self.assertEqual(0, transport.exists_calls)
+        self.assertEqual([], transport.writes)
+        self.assertEqual([], transport.keys)
+
+    def test_cli_reports_pre_injection_rejected_and_exits_non_zero(self) -> None:
+        transport = FakeTransport()
+        original = AGENTTUI.TRANSPORTS.copy()
+        AGENTTUI.TRANSPORTS.clear()
+        AGENTTUI.TRANSPORTS[FAKE_MUX] = lambda: transport
+        self.addCleanup(
+            lambda: (AGENTTUI.TRANSPORTS.clear(), AGENTTUI.TRANSPORTS.update(original))
+        )
+        repo = self.repo_with_unreadable_turn_state()
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+            status = AGENTTUI.main(
+                [
+                    "--repo",
+                    str(repo),
+                    "send",
+                    "--from",
+                    SENDER,
+                    "--to",
+                    TARGET,
+                    "--message",
+                    MESSAGE,
+                    "--no-observation-log",
+                ]
+            )
+
+        payload = json.loads(stdout.getvalue().strip())
+        self.assertEqual(AGENTTUI.EXIT_PRE_INJECTION_REJECTED, status)
+        self.assertEqual(AGENTTUI.DELIVERY_PRE_INJECTION_REJECTED, payload["delivery"])
+        self.assertEqual("none-pre-injection", payload["submit_action"])
+        self.assertFalse(payload["sent"])
+        self.assertTrue(payload["retry_safe"])
+        self.assertEqual("no-pane-command-executed", payload["verification_guidance"])
+        self.assertEqual([], transport.writes)
+
+    def test_the_refusal_is_not_conflated_with_no_operational_route(self) -> None:
+        # Both mean "nothing was sent", but the remedies differ: repair the route
+        # versus read the state again.
+        self.assertNotEqual(
+            AGENTTUI.EXIT_PRE_INJECTION_REJECTED, AGENTTUI.EXIT_NO_OPERATIONAL_ROUTE
+        )
+        self.assertNotEqual(
+            AGENTTUI.DELIVERY_PRE_INJECTION_REJECTED,
+            AGENTTUI.DELIVERY_NO_OPERATIONAL_ROUTE,
+        )
+
+    def test_a_claude_code_target_is_unaffected_by_the_same_transcript(self) -> None:
+        transport = FakeTransport()
+        repo = self.repo_with_unreadable_turn_state(brand="claude-code")
+
+        plan = AGENTTUI.plan_delivery(
+            repo,
+            sender_name=SENDER,
+            target_name=TARGET,
+            message=MESSAGE,
+            nonce=NONCE,
+            script_path=Path("/placeholder/agenttui.py"),
+            transports={FAKE_MUX: lambda: transport},
+        )
+
+        self.assertEqual(AGENTTUI.ROUTE_PANE, plan.route.mode)
+        self.assertIsNone(plan.payload["target_submit_activity"])
+
+    def test_dry_run_refuses_too_instead_of_showing_a_guessed_key(self) -> None:
+        transport = FakeTransport()
+        original = AGENTTUI.TRANSPORTS.copy()
+        AGENTTUI.TRANSPORTS.clear()
+        AGENTTUI.TRANSPORTS[FAKE_MUX] = lambda: transport
+        self.addCleanup(
+            lambda: (AGENTTUI.TRANSPORTS.clear(), AGENTTUI.TRANSPORTS.update(original))
+        )
+        repo = self.repo_with_unreadable_turn_state()
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+            status = AGENTTUI.main(
+                [
+                    "--repo",
+                    str(repo),
+                    "send",
+                    "--from",
+                    SENDER,
+                    "--to",
+                    TARGET,
+                    "--message",
+                    MESSAGE,
+                    "--dry-run",
+                ]
+            )
+
+        self.assertEqual(AGENTTUI.EXIT_PRE_INJECTION_REJECTED, status)
+        self.assertEqual(
+            AGENTTUI.DELIVERY_PRE_INJECTION_REJECTED,
+            json.loads(stdout.getvalue().strip())["delivery"],
+        )
+
+
+class PaneOutcomeClassificationTests(unittest.TestCase):
+    """Rule 4: name the outcome after the action that was actually executed.
+
+    One shared "unverified" value covered outcomes whose correct caller behaviour
+    is opposite — wait out a turn boundary, recover an unsubmitted composer,
+    inspect a command that never reported back — so the reading could not tell a
+    caller which one had happened. Each case below pins one action's outcome.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.session_file = Path(self.temporary.name) / "target-session.jsonl"
+        self.session_file.write_text("existing transcript line\n", encoding="utf-8")
+        self._window = AGENTTUI.PANE_VERIFY_WINDOW_SECONDS
+        self._queued = AGENTTUI.PANE_VERIFY_QUEUED_WINDOW_SECONDS
+        self._poll = AGENTTUI.PANE_VERIFY_POLL_INITIAL_SECONDS
+        AGENTTUI.PANE_VERIFY_WINDOW_SECONDS = 0.0
+        AGENTTUI.PANE_VERIFY_QUEUED_WINDOW_SECONDS = 0.0
+        AGENTTUI.PANE_VERIFY_POLL_INITIAL_SECONDS = 0.0
+
+        def restore() -> None:
+            AGENTTUI.PANE_VERIFY_WINDOW_SECONDS = self._window
+            AGENTTUI.PANE_VERIFY_QUEUED_WINDOW_SECONDS = self._queued
+            AGENTTUI.PANE_VERIFY_POLL_INITIAL_SECONDS = self._poll
+
+        self.addCleanup(restore)
+
+    def send(
+        self,
+        transport: FakeTransport,
+        *,
+        brand: str = "codex",
+        activity: str | None = None,
+        marker: str = "marker-absent",
+        submit_byte: str | None = None,
+    ):
+        route = AGENTTUI.DeliveryRoute(
+            mode=AGENTTUI.ROUTE_PANE,
+            cwd=Path(self.temporary.name),
+            transport=transport,
+            pane_ref=pane_ref(),
+            pane_text="envelope body",
+            submit_byte=submit_byte
+            or (
+                AGENTTUI.CODEX_PANE_QUEUE_BYTE
+                if activity == "active"
+                else AGENTTUI.PANE_ENTER_BYTE
+            ),
+            paste_framed=brand in AGENTTUI.PASTE_FRAMED_BRANDS,
+            submit_activity=activity,
+        )
+        payload = {
+            "target": TARGET,
+            "target_brand": brand,
+            "target_effective_state": "active",
+            "target_submit_activity": activity,
+            "target_session_file": str(self.session_file),
+            "delivery_marker": marker,
+            "nonce": NONCE,
+        }
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            status = AGENTTUI.send_via_pane(
+                route, payload, timeout=None, submit_delay=0.0
+            )
+        return (
+            status,
+            json.loads(stdout.getvalue().strip().splitlines()[-1]),
+            stderr.getvalue(),
+        )
+
+    def scripted_activity(self, *answers: str | None) -> list[int]:
+        """Replace the turn-state reading with a scripted sequence (a file seam)."""
+        calls: list[int] = []
+        queue = list(answers)
+
+        def fake(_session_file):
+            calls.append(1)
+            return queue.pop(0) if queue else answers[-1]
+
+        original = AGENTTUI.derive_codex_submit_activity
+        AGENTTUI.derive_codex_submit_activity = fake
+        self.addCleanup(setattr, AGENTTUI, "derive_codex_submit_activity", original)
+        return calls
+
+    def test_a_write_command_that_never_reports_back_is_write_unverified(self) -> None:
+        transport = FakeTransport()
+        transport.write_timeout = True
+
+        status, result, warnings = self.send(transport, activity="idle")
+
+        self.assertEqual(AGENTTUI.DELIVERY_WRITE_UNVERIFIED, result["delivery"])
+        self.assertEqual("none-write-command-unverified", result["submit_action"])
+        # A command that failed to report does not prove zero side effects.
+        self.assertFalse(result["retry_safe"])
+        self.assertEqual(AGENTTUI.EXIT_UNCERTAIN_DELIVERY, status)
+        self.assertEqual([], transport.keys)
+        self.assertIn("do not resend", warnings)
+
+    def test_a_submit_command_that_never_reports_back_is_distinguishable(self) -> None:
+        transport = FakeTransport()
+        transport.submit_timeouts = 1
+        self.scripted_activity("idle")
+
+        status, result, _warnings = self.send(transport, activity="idle")
+
+        self.assertEqual(
+            AGENTTUI.DELIVERY_SUBMIT_COMMAND_UNVERIFIED, result["delivery"]
+        )
+        self.assertNotEqual(
+            AGENTTUI.DELIVERY_WRITE_UNVERIFIED, result["delivery"]
+        )
+        self.assertEqual(AGENTTUI.EXIT_UNCERTAIN_DELIVERY, status)
+        self.assertEqual(1, len(transport.writes))
+
+    def test_unknown_turn_state_after_the_write_sends_no_key_at_all(self) -> None:
+        # The text is already in the composer, so guessing a key is the one thing
+        # that cannot be undone. Recovering that text is the caller's job.
+        transport = FakeTransport()
+        self.scripted_activity(None)
+
+        status, result, warnings = self.send(transport, activity="idle")
+
+        self.assertEqual(AGENTTUI.DELIVERY_COMPOSER_UNSUBMITTED, result["delivery"])
+        self.assertEqual("none-post-write-unknown", result["submit_action"])
+        self.assertEqual([], transport.keys)
+        self.assertEqual(1, len(transport.writes))
+        self.assertEqual(AGENTTUI.EXIT_UNCERTAIN_DELIVERY, status)
+        self.assertEqual(
+            "recover-existing-composer-do-not-rewrite", result["recommended_action"]
+        )
+        self.assertIn("unsubmitted in the composer", warnings)
+
+    def test_a_turn_that_ends_during_the_settle_delay_switches_to_enter(self) -> None:
+        # Planned as Tab while the turn was running; by key time the turn was over,
+        # and Tab into an idle composer enqueues nothing.
+        transport = FakeTransport()
+        self.scripted_activity("idle")
+
+        _status, result, _warnings = self.send(transport, activity="active")
+
+        self.assertEqual([AGENTTUI.PANE_ENTER_BYTE], transport.keys[:1])
+        self.assertEqual("enter-submit", result["submit_action"])
+        self.assertEqual("idle", result["target_submit_activity"])
+
+    def test_a_running_turn_is_enqueued_once_and_reported_as_queued(self) -> None:
+        transport = FakeTransport()
+        self.scripted_activity("active")
+
+        status, result, warnings = self.send(transport, activity="active")
+
+        self.assertEqual(AGENTTUI.DELIVERY_QUEUED_FOR_NEXT_TURN, result["delivery"])
+        self.assertEqual("tab-queue", result["submit_action"])
+        self.assertEqual([AGENTTUI.CODEX_PANE_QUEUE_BYTE], transport.keys)
+        self.assertEqual(
+            "early-transcript-miss-is-not-nondelivery-evidence",
+            result["verification_guidance"],
+        )
+        self.assertIn("wait for the turn boundary", warnings)
+        self.assertEqual(0, status)
+
+    def test_an_unverified_enter_is_retried_only_while_still_idle(self) -> None:
+        transport = FakeTransport()
+        # idle before the key, still idle before the retry.
+        self.scripted_activity("idle", "idle")
+
+        _status, result, _warnings = self.send(transport, activity="idle")
+
+        self.assertEqual(2, len(transport.keys))
+        self.assertEqual(AGENTTUI.DELIVERY_SUBMIT_UNVERIFIED, result["delivery"])
+
+    def test_no_second_enter_once_the_target_started_a_turn(self) -> None:
+        # A second Enter would steer the turn that just started.
+        transport = FakeTransport()
+        self.scripted_activity("idle", "active")
+
+        _status, result, _warnings = self.send(transport, activity="idle")
+
+        self.assertEqual(1, len(transport.keys))
+        self.assertEqual(AGENTTUI.DELIVERY_SUBMIT_UNVERIFIED, result["delivery"])
+
+    def test_no_second_enter_when_the_state_became_unreadable(self) -> None:
+        transport = FakeTransport()
+        self.scripted_activity("idle", None)
+
+        _status, result, _warnings = self.send(transport, activity="idle")
+
+        self.assertEqual(1, len(transport.keys))
+        self.assertEqual(AGENTTUI.DELIVERY_SUBMIT_UNVERIFIED, result["delivery"])
+        self.assertIsNone(result["target_submit_activity"])
+
+    def test_delivery_reports_the_nonce_as_the_only_evidence(self) -> None:
+        marker = f"from={SENDER} nonce={NONCE}"
+        transport = FakeTransport()
+        self.scripted_activity("idle")
+
+        def append_marker(*_args, **_kwargs):
+            with self.session_file.open("a", encoding="utf-8") as stream:
+                stream.write(marker + "\n")
+            return AGENTTUI.CommandOutcome(
+                argv=["fake"], returncode=0, stdout="", stderr="", rejected=False, detail=""
+            )
+
+        transport.send_key = append_marker  # type: ignore[assignment]
+        status, result, _warnings = self.send(
+            transport, activity="idle", marker=marker
+        )
+
+        self.assertEqual(AGENTTUI.DELIVERY_DELIVERED, result["delivery"])
+        self.assertEqual("envelope-nonce-found", result["evidence"])
+        self.assertEqual("await-peer-ack", result["recommended_action"])
+        # Delivery is transport entry; only a peer reply is a semantic ACK.
+        self.assertFalse(result["acknowledged"])
+        self.assertEqual(0, status)
+
+    def test_every_pane_outcome_carries_the_full_action_field_set(self) -> None:
+        required = {
+            "delivery",
+            "submit_action",
+            "recommended_action",
+            "verification_guidance",
+            "retry_safe",
+            "nonce",
+            "evidence",
+            "acknowledged",
+            "target_submit_activity",
+            "target_effective_state",
+        }
+        transport = FakeTransport()
+        self.scripted_activity("active")
+
+        _status, result, _warnings = self.send(transport, activity="active")
+
+        self.assertTrue(required.issubset(result.keys()), required - result.keys())
+
+    def test_deriving_the_turn_state_issues_no_pane_command(self) -> None:
+        # Observation discipline: the reading that decides the submit key must not
+        # add to the command sequence the target sees. Exactly one write and one
+        # key, the same sequence as before this facility existed.
+        transport = FakeTransport()
+        self.scripted_activity("active")
+
+        self.send(transport, activity="active")
+
+        self.assertEqual(1, len(transport.writes))
+        self.assertEqual(1, len(transport.keys))
+        self.assertEqual(0, transport.exists_calls)
+
+
+class BracketedPasteFramingTests(unittest.TestCase):
+    """Shape 3's causal fix: framing, not a different multiplexer.
+
+    Measured downstream on one Codex version: an unframed fast character stream is
+    classified as a paste burst, and the submit key is then consumed as a newline
+    inside that burst — mechanically idle target, both key commands returning 0,
+    envelope still in the composer. Framing addresses the write *method* only; it
+    must not change routing, the transport choice, or the command sequence.
+    """
+
+    def route(self, brand: str) -> "AGENTTUI.DeliveryRoute":
+        return AGENTTUI.build_route(
+            make_record(brand=brand, state="idle", pane_ref=pane_ref()),
+            "line one\nline two",
+            transports={FAKE_MUX: lambda: FakeTransport()},
+            codex_submit_activity="idle" if brand == "codex" else None,
+        )
+
+    def test_a_codex_envelope_is_framed_as_one_paste(self) -> None:
+        route = self.route("codex")
+
+        self.assertTrue(route.paste_framed)
+        self.assertEqual(
+            f"{AGENTTUI.BRACKETED_PASTE_START}line one line two"
+            f"{AGENTTUI.BRACKETED_PASTE_END}",
+            route.pane_argv()[-1],
+        )
+
+    def test_claude_code_is_deliberately_left_unframed(self) -> None:
+        # No measurement supports framing there, and its composer has its own
+        # paste handling — so the allow-list stays narrow rather than "always".
+        route = self.route("claude-code")
+
+        self.assertFalse(route.paste_framed)
+        self.assertEqual("line one line two", route.pane_argv()[-1])
+        self.assertEqual({"codex"}, set(AGENTTUI.PASTE_FRAMED_BRANDS))
+
+    def test_framing_changes_the_text_only_never_the_key_or_the_route(self) -> None:
+        codex = self.route("codex")
+        claude = self.route("claude-code")
+
+        self.assertEqual(AGENTTUI.PANE_ENTER_BYTE, codex.submit_byte)
+        self.assertEqual(codex.submit_byte, claude.submit_byte)
+        self.assertEqual(codex.mode, claude.mode)
+        self.assertEqual(claude.submit_argv(), codex.submit_argv())
+
+    def test_the_escape_bytes_live_in_the_transport_not_in_routing(self) -> None:
+        # Routing asks a capability question (paste_framed); the mechanism is the
+        # transport's business, exactly like the multiplexer's command lines.
+        routing_source = "".join(
+            inspect.getsource(function)
+            for function in (
+                AGENTTUI.build_route,
+                AGENTTUI.build_pane_route,
+                AGENTTUI.build_resume_route,
+            )
+        )
+
+        for mechanism in ("200~", "201~", "\x1b["):
+            self.assertNotIn(mechanism, routing_source)
+
+    def test_the_concrete_transport_frames_at_its_command_line(self) -> None:
+        transport = AGENTTUI.ZellijTransport(
+            runner=RecordingRunner(), which=lambda _name: "/placeholder/zellij"
+        )
+
+        framed = transport.write_chars_argv(pane_ref("zellij"), "body", paste_framed=True)
+        plain = transport.write_chars_argv(pane_ref("zellij"), "body")
+
+        self.assertTrue(framed[-1].startswith(AGENTTUI.BRACKETED_PASTE_START))
+        self.assertTrue(framed[-1].endswith(AGENTTUI.BRACKETED_PASTE_END))
+        self.assertEqual("body", plain[-1])
+        # Same verb, same addressing, same command count: only the payload differs.
+        self.assertEqual(framed[:-1], plain[:-1])
+
+    def test_a_transport_may_override_the_framing_mechanism(self) -> None:
+        # The abstraction owns the intent, not the escape bytes: a transport with a
+        # native paste primitive must be able to use it instead.
+        class NativePasteTransport(FakeTransport):
+            def frame_paste(self, text: str) -> str:
+                return f"<native-paste>{text}</native-paste>"
+
+        transport = NativePasteTransport()
+        route = AGENTTUI.build_route(
+            make_record(brand="codex", state="idle", pane_ref=pane_ref()),
+            "body",
+            transports={FAKE_MUX: lambda: transport},
+            codex_submit_activity="idle",
+        )
+
+        self.assertEqual("<native-paste>body</native-paste>", route.pane_argv()[-1])
+
+    def test_framing_does_not_change_the_command_sequence(self) -> None:
+        runner = RecordingRunner()
+        transport = AGENTTUI.ZellijTransport(
+            runner=runner, which=lambda _name: "/placeholder/zellij"
+        )
+
+        transport.write_chars(pane_ref("zellij"), "body", paste_framed=True)
+
+        self.assertEqual(["write-chars"], runner.actions())
+
+
+class FakePopen:
+    """Fake detached process: scripted poll answers, records any kill attempt."""
+
+    def __init__(self, poll_answers: list[int | None], **kwargs) -> None:
+        self.kwargs = kwargs
+        self.pid = 424242
+        self._answers = list(poll_answers)
+        self.signals: list[str] = []
+
+    def poll(self) -> int | None:
+        if not self._answers:
+            return None
+        answer = self._answers[0]
+        if len(self._answers) > 1:
+            self._answers.pop(0)
+        return answer
+
+    def kill(self) -> None:  # pragma: no cover - must never be called
+        self.signals.append("kill")
+
+    def terminate(self) -> None:  # pragma: no cover - must never be called
+        self.signals.append("terminate")
+
+    def wait(self, timeout=None) -> int:  # pragma: no cover
+        self.signals.append("wait")
+        return 0
+
+
+class DetachedResumeTests(unittest.TestCase):
+    """The resume runner carries the target's whole turn, so we must not own it.
+
+    Running it under this process's timeout made the sender's patience the
+    target's deadline: a sender-side timeout SIGKILLed a runner that was working
+    correctly, aborting a turn that may already have written files or called out
+    to other systems. The window here bounds observation only.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.session_file = Path(self.temporary.name) / "target-session.jsonl"
+        self.session_file.write_text("existing transcript line\n", encoding="utf-8")
+        self.marker = f"from={SENDER} nonce={NONCE}"
+        self._poll = AGENTTUI.PANE_VERIFY_POLL_INITIAL_SECONDS
+        AGENTTUI.PANE_VERIFY_POLL_INITIAL_SECONDS = 0.0
+        self.addCleanup(
+            setattr, AGENTTUI, "PANE_VERIFY_POLL_INITIAL_SECONDS", self._poll
+        )
+
+    def append_marker(self) -> None:
+        with self.session_file.open("a", encoding="utf-8") as stream:
+            stream.write(self.marker + "\n")
+
+    def send(
+        self,
+        poll_answers: list[int | None],
+        *,
+        timeout: float = 0.0,
+        on_start=None,
+    ):
+        processes: list[FakePopen] = []
+
+        def fake_popen(argv, **kwargs):
+            process = FakePopen(poll_answers, **kwargs)
+            processes.append(process)
+            if on_start is not None:
+                # Runs after the pre-send boundary was recorded, so anything it
+                # appends counts as post-boundary evidence.
+                on_start()
+            return process
+
+        route = AGENTTUI.DeliveryRoute(
+            mode=AGENTTUI.ROUTE_RESUME,
+            cwd=Path(self.temporary.name),
+            argv=["placeholder-resume-cli", "--resume", "placeholder-id", "envelope"],
+        )
+        payload = {
+            "target": TARGET,
+            "target_brand": "claude-code",
+            "target_effective_state": "idle",
+            "target_session_file": str(self.session_file),
+            "delivery_marker": self.marker,
+            "nonce": NONCE,
+        }
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        original = AGENTTUI.subprocess.Popen
+        AGENTTUI.subprocess.Popen = fake_popen
+        try:
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                status = AGENTTUI.send_via_resume(route, payload, timeout=timeout)
+        finally:
+            AGENTTUI.subprocess.Popen = original
+        result = json.loads(stdout.getvalue().strip().splitlines()[-1])
+        return status, result, stderr.getvalue(), processes[0]
+
+    def test_the_runner_is_started_in_its_own_process_session(self) -> None:
+        _status, result, _warnings, process = self.send([None])
+
+        self.assertTrue(process.kwargs["start_new_session"])
+        self.assertEqual(AGENTTUI.subprocess.DEVNULL, process.kwargs["stdin"])
+        self.assertEqual("detached-from-sender", result["execution_lifecycle"])
+        self.assertEqual(process.pid, result["runner_pid"])
+
+    def test_an_expired_observation_window_never_kills_the_runner(self) -> None:
+        status, result, warnings, process = self.send([None])
+
+        self.assertEqual(
+            AGENTTUI.DELIVERY_RESUME_STARTED_UNVERIFIED, result["delivery"]
+        )
+        self.assertEqual([], process.signals)
+        self.assertEqual("running", result["runner_state"])
+        self.assertEqual(0, status)
+        self.assertIn("was NOT terminated", warnings)
+
+    def test_an_abandoned_runner_keeps_a_readable_output_path(self) -> None:
+        # Not DEVNULL: for the claude-code shape the runner's stdout is the only
+        # place the target's reply ever appears. Not a pipe either -- an abandoned
+        # runner whose pipe buffer filled would block inside the target's turn.
+        _status, result, _warnings, _process = self.send([None])
+
+        output_path = Path(result["runner_output_path"])
+        self.addCleanup(output_path.unlink, True)
+        self.assertTrue(output_path.exists())
+        self.assertEqual(0o600, output_path.stat().st_mode & 0o777)
+
+    def test_the_nonce_is_the_delivery_evidence_here_too(self) -> None:
+        status, result, _warnings, process = self.send([None], on_start=self.append_marker)
+
+        self.assertEqual(AGENTTUI.DELIVERY_DELIVERED, result["delivery"])
+        self.assertEqual("envelope-nonce-found", result["evidence"])
+        self.assertEqual([], process.signals)
+        self.assertEqual(0, status)
+
+    def test_delivery_does_not_claim_the_target_turn_finished(self) -> None:
+        _status, result, _warnings, _process = self.send([None], on_start=self.append_marker)
+
+        self.assertEqual("unverified", result["task_completion"])
+        self.assertEqual("not-observed", result["target_turn_outcome"])
+        self.assertFalse(result["acknowledged"])
+
+    def test_a_runner_exit_before_the_nonce_is_its_own_outcome(self) -> None:
+        status, result, warnings, _process = self.send([0])
+
+        self.assertEqual(
+            AGENTTUI.DELIVERY_RESUME_EXITED_UNVERIFIED, result["delivery"]
+        )
+        self.assertEqual("exited", result["runner_state"])
+        self.assertEqual(0, result["runner_returncode"])
+        self.assertEqual(AGENTTUI.EXIT_UNCERTAIN_DELIVERY, status)
+        self.assertFalse(result["retry_safe"])
+        self.assertIn("does not prove the target had no side", warnings)
+
+    def test_a_runner_exit_cleans_up_its_capture_file(self) -> None:
+        _status, result, _warnings, _process = self.send([0])
+
+        self.assertIsNone(result["runner_output_path"])
+
+    def test_a_transcript_append_racing_the_exit_is_still_counted(self) -> None:
+        # The runner can exit between the last poll and the transcript flush, so
+        # one final message-specific reading happens after the exit is seen.
+        checks: list[int] = []
+        original = AGENTTUI.transcript_contains_marker
+
+        def fake(path, marker, start_offset):
+            checks.append(1)
+            return len(checks) >= 2
+
+        AGENTTUI.transcript_contains_marker = fake
+        self.addCleanup(setattr, AGENTTUI, "transcript_contains_marker", original)
+
+        _status, result, _warnings, _process = self.send([0])
+
+        self.assertEqual(AGENTTUI.DELIVERY_DELIVERED, result["delivery"])
+        self.assertEqual(2, len(checks))
+
+    def test_the_observation_window_is_bounded_by_the_callers_timeout(self) -> None:
+        # A fake clock only advances through the injected sleep, so this case needs
+        # a real poll interval; setUp zeroes it for the fast cases.
+        AGENTTUI.PANE_VERIFY_POLL_INITIAL_SECONDS = 0.1
+        slept: list[float] = []
+        now = [0.0]
+
+        class NeverExits:
+            def poll(self):
+                return None
+
+        found, returncode = AGENTTUI.observe_detached_resume(
+            NeverExits(),
+            self.session_file,
+            "marker-absent",
+            0,
+            2.0,
+            monotonic=lambda: now[0],
+            sleep=lambda seconds: (slept.append(seconds), now.__setitem__(0, now[0] + seconds)),
+        )
+
+        self.assertFalse(found)
+        self.assertIsNone(returncode)
+        self.assertAlmostEqual(2.0, sum(slept), places=6)
+
+    def test_no_code_path_here_can_signal_the_runner(self) -> None:
+        # Mechanical: the whole point is that this process never ends the target's
+        # turn, so the resume path must contain no termination call at all.
+        source = "".join(
+            inspect.getsource(function)
+            for function in (AGENTTUI.send_via_resume, AGENTTUI.observe_detached_resume)
+        )
+
+        for forbidden in (".kill(", ".terminate(", ".send_signal(", "os.killpg"):
+            self.assertNotIn(forbidden, source)
 
 
 class ProbeReturnCodeTests(unittest.TestCase):
