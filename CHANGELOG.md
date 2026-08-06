@@ -476,6 +476,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   has permanent work, and every finding it reports was avoidable.
 
 ### Fixed
+- **The "trap SIGHUP" cleanup mechanism recorded one commit earlier is refuted by measurement under real use**
+  (`agenttui-registry.md` §5.0-b) — closing the outer pane does deliver a catchable `SIGHUP`, and trapping it
+  passed end-to-end **in a test where the pane's only foreground process was a script**. Under real use it
+  failed: after the human closed the pane, the inner client was gone, the inner **session survived**, and the
+  ATUI **kept running** — the "invisible live agent" this section exists to prevent. The cause is that the two
+  process structures are not isomorphic: in the test the trap sat on the script that *was* the foreground
+  process, whereas a human pastes the command into an **interactive shell**, so the trap sits on a shell with
+  job control whose SIGHUP handling differs — the trap never ran. The reliable mechanism therefore goes back
+  to the multiplexer's built-in destroy-on-last-client-detach, which depends on neither a signal nor a shell
+  type and so behaves the same either way; its known cost is that an *inner* detach is also caught, which
+  matters only for someone who detaches at that layer. The general rule is recorded as the more valuable part:
+  **when validating a mechanism triggered by a human action, the test's process structure must be isomorphic
+  to real use** — "the signal arrives" and "the trap runs" are two different claims, and passing the first does
+  not establish the second, while the difference between them (script shell versus interactive shell) is
+  invisible from inside the test.
 - **Two corrections to the ack module found while reviewing it, both silent-failure shaped** — (a) the
   envelope header parser only handled the **multi-line** form, so an envelope flattened onto one line
   produced **no ack at all**; since neither the composer's newline handling nor a brand's hook-payload
