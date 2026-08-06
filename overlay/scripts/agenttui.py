@@ -238,7 +238,43 @@ INTRUSION_NO_FOCUS_COMMAND = "no-focus-command-issued"
 #      looking at, and averaging the two answers neither "how common" nor "how
 #      bad". Each record therefore carries its own stratification fields and the
 #      folding is left to analysis time.
-OBSERVATION_LOG_DEFAULT = Path.home() / ".arborist" / "focus-intrusion.jsonl"
+ARBORIST_HOME_ENV = "ARBORIST_HOME"
+
+
+def arborist_home() -> Path:
+    """The machine-level Arborist root: `$ARBORIST_HOME`, else `~/.arborist`.
+
+    The override exists so the global tier can be exercised against a scratch
+    directory. Without it, every dry run of a migration that *moves* something
+    into the global root has to be performed on the one real copy of that root --
+    which is not a dry run.
+
+    Two properties are load-bearing and pinned by tests:
+
+    * **unset (or empty) resolves to `~/.arborist`, byte for byte.** An empty
+      string is a set-but-blank variable, which is how a shell passes "I did not
+      mean to configure this"; treating it as a root would resolve to the process
+      cwd. So the default is not merely the fallback, it is the default for both
+      spellings of absence.
+    * **read once, at import.** The derived defaults below are module constants,
+      so a caller that flips the variable mid-process does not get a half-moved
+      set of paths. Change it before starting the process.
+    """
+
+    override = os.environ.get(ARBORIST_HOME_ENV)
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".arborist"
+
+
+# Focus-intrusion observations are appended here (see the block above for why the
+# log stores events and never ratios).
+OBSERVATION_LOG_DEFAULT = arborist_home() / "focus-intrusion.jsonl"
+
+# The cross-project discovery entry point (agenttui-registry.md §2.3). Named once
+# so the several subcommands that accept `--global-index` cannot drift into
+# different defaults.
+GLOBAL_INDEX_DEFAULT = arborist_home() / "index.json"
 
 # Capturing the active tab around the probe costs one extra read-only command, so
 # it runs only when an observation is actually going to be recorded (see
@@ -2741,7 +2777,7 @@ def create_parser() -> argparse.ArgumentParser:
     heartbeat.add_argument(
         "--global-index",
         type=Path,
-        default=Path.home() / ".arborist" / "index.json",
+        default=GLOBAL_INDEX_DEFAULT,
     )
 
     stop = subparsers.add_parser(
@@ -2753,7 +2789,7 @@ def create_parser() -> argparse.ArgumentParser:
     stop.add_argument(
         "--global-index",
         type=Path,
-        default=Path.home() / ".arborist" / "index.json",
+        default=GLOBAL_INDEX_DEFAULT,
     )
 
     status = subparsers.add_parser(
