@@ -113,7 +113,14 @@ LINEAGE_DEFAULT = 1
 
 # The tiebreak's input priority, fixed by guide §2.2.1. Kept as one string so
 # the report and the guide cannot drift into two different orders.
-TIEBREAK_PRIORITY = "1) the pane's real cwd > 2) each leaf's session_file ownership > 3) last_seen"
+TIEBREAK_PRIORITY = (
+    "1) the pane's real cwd > 2) each leaf's session_file ownership "
+    "(BRAND-DEPENDENT: only meaningful where the brand stores sessions in "
+    "per-project directories; a brand whose rollout logs live in one global "
+    "directory carries no ownership information in that path at all, and its "
+    "substitute reading is the cwd the session records about itself in its "
+    "first rollout entry) > 3) last_seen"
+)
 
 # Why the *highest*-priority input is nonetheless reported as `unknown`.
 #
@@ -440,8 +447,13 @@ def check_session_id_uniqueness(leaves: Sequence[Leaf]) -> list[Finding]:
             Finding(
                 "duplicate-session-id",
                 f"session_id {session_id} is claimed {scope}: {listed}. "
-                "One session belongs to one project; the leaf that does not "
-                "belong to its project is the one deleted."
+                "One session belongs to one project -- but judge the *kind* of "
+                "duplication before judging which side is wrong: a leaf that "
+                "*declares itself* a cross-repo mirror (naming the authoritative "
+                "entry, why it exists, and who authorised it) is a schema gap, "
+                "not stray data, and deleting it only removes another repo's "
+                "ability to reach this agent. Delete only an unmarked claim, and "
+                "only after the readings below decide it."
                 + tiebreak_readings(claimants),
             )
         )
