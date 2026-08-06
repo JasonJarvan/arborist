@@ -52,6 +52,10 @@ cp "$SRC/scripts/arborist_brand_capacity.py" "$ROOT/.trellis/scripts/"; chmod +x
 # `<repo>/.trellis/scripts/` 发现它。**接线是手工的**（改 host 的 hook 配置），模板见
 # overlay/hook-templates/submit-ack/ 与 ADOPT.md 手动收尾第 2 步。
 cp "$SRC/scripts/agenttui_submit_ack.py" "$ROOT/.trellis/scripts/"; chmod +x "$ROOT/.trellis/scripts/agenttui_submit_ack.py"
+# probe.py —— 「取证命令本身会出错」那条通则的机械载体：分离两条流、报被诊断命令自己的
+# rc、并**扣住未经 control 佐证的否定读数**（四种结局各有互不相同的退出码）。放这里而非
+# 只写进规范，理由就是那条通则的元结论：一条省略成本为零的规则等于没有。
+cp "$SRC/scripts/probe.py" "$ROOT/.trellis/scripts/"; chmod +x "$ROOT/.trellis/scripts/probe.py"
 # harness 机械门 validator 四件（只读校验，无网络、无凭证）：
 #   validate_adr_numbers.py         —— ADR 四位编号唯一 + ADR 文件对「记规范那个 git」可见
 #                                      （--visibility machine-local|product-git，缺失/歧义 fail closed）
