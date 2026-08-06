@@ -36,6 +36,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   deliberately, since syncing would hide the rot.
 
 ### Added
+- **An agent's `capabilities` record the REASON, not a boolean** (`agenttui-registry.md` §2.1.1, closed
+  set `available` / `policy-denied` / `unavailable`, enforced by a new registry-validator check) —
+  **policy-denied is not capability-absent. The effect is identical (nothing can be dispatched) and the
+  recovery path is opposite**: a policy denial is lifted by one sentence from a human, while an absent
+  tool needs a different host or brand. Live instance: a session whose brand was right and whose
+  dispatch tool existed and worked, but whose host instructions forbade using it unasked -- brand
+  correct, capability present, gate unsatisfiable, all at once. A boolean `can_dispatch` collapses that
+  cell into "there is no such tool", and the direct consequence of collapsing them is that the
+  escalation cannot say **whom to escalate to or what to ask for** -- so escalation degrades into "I
+  can't", which is a silent skip wearing a report's clothing. Execution policy: on hitting a capability
+  branch a mandatory gate must **always escalate, never silently skip**, with the target chosen by the
+  reason (`policy-denied` -> human, `unavailable` -> upstream), and both cases must leave "gate not
+  executed + reason + escalated to whom" in the task record, or a later reader reads "the gate did not
+  complain" as "the gate passed". An absent field reads as **unknown, never as available**. Completes a
+  trio with two rules already landed: end-to-end gate regression is *tested but did not reach the
+  gate*; this is *not tested but looks tested*; the landed-needs-a-reading rule is *not done while the
+  table says done*.
 - **A status table's "landed" cell must carry an independent reading** (`verification-and-gates.md`) —
   cross-session work allocates attention through status tables (gap queues, dashboards, ledgers,
   progress letters), and a cell marked done normally originates from the OWNER'S OWN REPORT while the

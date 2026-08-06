@@ -759,6 +759,52 @@ def check_half_registered_b(
     return findings
 
 
+# The closed set for `capabilities` values. A boolean would collapse
+# "the tool is absent" into "policy forbids using it": identical effect, opposite
+# recovery path and opposite escalation target -- and collapsing them is what turns
+# escalation into a bare "I can't", i.e. a silent skip. See agenttui-registry.md
+# §2.1.1.
+CAPABILITY_VALUES = ("available", "policy-denied", "unavailable")
+
+
+def check_capability_values(leaves: Sequence[Leaf]) -> list[Finding]:
+    """Check 8: `capabilities` values must come from the closed set.
+
+    A free-text value cannot be routed: the whole point of the tri-state is that
+    the value NAMES THE ESCALATION TARGET. An unrecognised value is therefore not
+    a cosmetic issue -- it is a gate whose escalation has nowhere to go, which
+    degrades to the silent skip the field exists to prevent. Absent is fine and
+    reads as `unknown` (never as `available`); present-but-unrecognised is not.
+    """
+
+    findings: list[Finding] = []
+    for leaf in leaves:
+        capabilities = leaf.spec.get("capabilities")
+        if capabilities is None:
+            continue
+        if not isinstance(capabilities, dict):
+            findings.append(
+                Finding(
+                    "capability-value-invalid",
+                    f"{leaf.where}/{SPEC_NAME}: 'capabilities' must be an object "
+                    f"mapping a capability name to one of {CAPABILITY_VALUES}",
+                )
+            )
+            continue
+        for name, value in sorted(capabilities.items()):
+            if value not in CAPABILITY_VALUES:
+                findings.append(
+                    Finding(
+                        "capability-value-invalid",
+                        f"{leaf.where}/{SPEC_NAME}: capabilities[{name!r}] = {value!r} "
+                        f"is not one of {CAPABILITY_VALUES}. The value names the "
+                        "escalation target (policy-denied -> human, unavailable -> "
+                        "upstream); an unroutable value makes the gate skip silently",
+                    )
+                )
+    return findings
+
+
 def check_project_self_consistency(leaves: Sequence[Leaf]) -> list[Finding]:
     """Check 5: declared project path == hosting repo, and project_id recomputes."""
 
@@ -1214,6 +1260,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         check_half_registered_b(leaves, summaries_by_key, index_path=index_path)
     )
     findings.extend(check_project_self_consistency(leaves))
+    findings.extend(check_capability_values(leaves))
     findings.extend(
         check_summary_agreement(leaves, summaries_by_key, index_path=index_path)
     )

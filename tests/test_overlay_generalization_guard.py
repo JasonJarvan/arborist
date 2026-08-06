@@ -180,6 +180,23 @@ class ThreeGeneralRulesLandedTest(unittest.TestCase):
         # 语言侧那一半：只修读表侧修不掉。
         self.assertIn("已排入,未落", text)
 
+    def test_capability_tri_state_landed_with_its_executor(self) -> None:
+        registry = self.read("spec/guides/agenttui-registry.md")
+        self.assertIn("#### 2.1.1 `capabilities`：记原因，不记布尔", registry)
+        # 三值闭集缺一即不可路由。
+        for value in ("`available`", "`policy-denied`", "`unavailable`"):
+            self.assertIn(value, registry)
+        # 存在的全部理由是这一句；删掉它就会有人把它简化回布尔。
+        self.assertIn("策略禁用 ≠ 能力缺失", registry)
+        # 缺字段读作 unknown，不是 available。
+        self.assertIn("不读作 `available`", registry)
+        # 执行者:validator 的闭集校验必须真在。
+        validator = (OVERLAY / "scripts" / "validate_agenttui_registry.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("CAPABILITY_VALUES", validator)
+        self.assertIn("capability-value-invalid", validator)
+
     def test_transient_carrier_rule_has_executor_and_failsafe_direction(self) -> None:
         text = self.read("spec/guides/verification-and-gates.md")
         self.assertIn("### transient 载体销毁前必须抽取判据", text)
