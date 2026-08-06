@@ -38,6 +38,12 @@ Six checks run over one global index plus the project leaf trees it points at:
    repo it actually sits in, and `project_id` must equal the sha256 prefix
    recomputed from that path. This is the mechanical detector for the failure
    shape "every field correct, the whole tree written one directory too high".
+
+   Detection here is the **weaker half**: as long as the registration path
+   accepts a hand-written `project_id`, this check has permanent work. The
+   stronger half is to compute the value at write time — `--print-project-id
+   <repo>` is the mechanical source for that, so no template has to offer a
+   blank to copy into.
 6. **index summary vs leaf agreement** — `role` / `brand` / `state` / `lineage`
    (absent reads as 1) must match, with the **leaf as authoritative** (guide §1).
 
@@ -49,6 +55,23 @@ differs per direction and neither licenses GC.
 repos, and deleting one is a judgement about which project a session belongs to,
 not something a validator may make. It also never touches the network, reads no
 credentials, and starts or stops nothing.
+
+The two findings that can span repos (`duplicate-session-id`,
+`pane-ref-conflict`) therefore carry the **readings a tiebreak needs** inline —
+every claimant's path, `session_id`, `session_file`, `state`, `last_seen` and
+`pane_ref` — so whoever adjudicates does not have to go re-read the leaves. A
+cross-repo conflict has **no owner by construction**: each lane's own leaf reads
+as self-consistent, the conflict is only visible globally, and "fix it in your
+own lane" predictably ends with both sides waiting for the other. The
+adjudication is made **once, globally**, and its product is a *named ruling*
+(which claim is legitimate, which leaf is deleted, and the readings it rests on)
+handed to the lane that owns the leaf judged wrong. Reporting readings is not
+adjudicating: this script does neither the ruling nor the deletion.
+
+Also read-only: the pane's **real cwd**, the highest-priority tiebreak input, is
+**never acquired here** — see `PANE_CWD_NOT_ACQUIRED`. This script runs no
+external command at all, which is the mechanical proof that adding these
+readings did not add an observation.
 
 A missing or unparsable global index exits 2 (fail closed) rather than reading
 as "nothing to check". A single project path that no longer exists is reported
@@ -87,6 +110,32 @@ PROJECT_ID_LENGTH = 12
 # that omits it still compare equal.
 SUMMARY_FIELDS = ("role", "brand", "state", "lineage")
 LINEAGE_DEFAULT = 1
+
+# The tiebreak's input priority, fixed by guide §2.2.1. Kept as one string so
+# the report and the guide cannot drift into two different orders.
+TIEBREAK_PRIORITY = "1) the pane's real cwd > 2) each leaf's session_file ownership > 3) last_seen"
+
+# Why the *highest*-priority input is nonetheless reported as `unknown`.
+#
+# Reading a pane's real cwd means mapping the pane to the process running in it,
+# which needs a pane-addressed multiplexer command. In the reference multiplexer
+# the only command that reliably reports whether a given pane exists **is the
+# focus command** — running it can pull a human's view onto that pane — and the
+# layout dump carries no pane->pid mapping, so there is no read-only path to the
+# same reading. Per verification-and-gates ("a new observation must first prove
+# it does not perturb what it observes"), an observation that can move somebody's
+# view is not read-only, and a *validator* is the worst place to hide one: it is
+# run in bulk, including before and after GC. So the reading is not taken; it is
+# named as one a human has to supply.
+PANE_CWD_NOT_ACQUIRED = (
+    "unknown — not acquired by this validator, and deliberately so: obtaining it "
+    "needs a pane-addressed multiplexer command, and the only one that reports "
+    "pane existence is the focus command, which can pull a human's view onto the "
+    "pane (the layout dump carries no pane->pid mapping, so there is no "
+    "read-only substitute). An observation that perturbs what it observes does "
+    "not belong in a validator that is run in bulk. Supply this reading manually "
+    "(the cwd of the process actually running in that pane) before ruling"
+)
 
 # Declared states from which no pane addressing is expected to reach anybody.
 # Everything else — `active`, the reserved `idle`, and any unknown or absent
@@ -308,6 +357,65 @@ def collect_leaves(project_root: Path) -> tuple[list[Leaf], list[Finding]]:
     return leaves, findings
 
 
+def reading_value(value: Any) -> str:
+    """Render one reading so that "no value" stays distinguishable from a value.
+
+    An absent field prints `absent`, never an empty string: a blank in a ruling's
+    evidence column reads as "checked, nothing there" when it may equally mean
+    "never written".
+    """
+
+    if value is None:
+        return "absent"
+    if isinstance(value, str):
+        return value if value else "empty-string"
+    return repr(value)
+
+
+def leaf_reading(leaf: Leaf) -> str:
+    """Every reading a tiebreak needs from one claimant, verbatim as written."""
+
+    runtime = leaf.runtime
+    key = pane_ref_key(runtime.get("pane_ref"))
+    pane = (
+        f"(multiplexer={key[0]}, session={key[1]}, pane_id={key[2]})"
+        if key is not None
+        else "absent-or-unusable"
+    )
+    return (
+        f"claimant {leaf.where}: session_id={reading_value(runtime.get('session_id'))}, "
+        f"session_file={reading_value(runtime.get('session_file'))}, "
+        f"state={reading_value(runtime.get('state'))}, "
+        f"last_seen={reading_value(runtime.get('last_seen'))}, "
+        f"pane_ref={pane}"
+    )
+
+
+def tiebreak_readings(claimants: Sequence[Leaf]) -> str:
+    """The readings block appended to every finding that can span two repos.
+
+    It exists so the ruling can be made from the report alone. It states who
+    rules, too: a cross-repo conflict has no owner by construction (each lane's
+    leaf is self-consistent, the conflict is only visible globally), so the
+    ruling is made **once, globally**, and this validator does not make it.
+    """
+
+    lines = [
+        "",
+        f"  tiebreak inputs, in priority order: {TIEBREAK_PRIORITY}.",
+        "  The ruling is made ONCE, GLOBALLY, from all claimants at the same time "
+        "— not by each lane for its own leaf, which is how both sides end up "
+        "waiting for the other. This validator reports the readings and does NOT "
+        "rule: the ruling is a named one (which claim is legitimate, which leaf "
+        "is deleted, and the readings it rests on) handed to the lane owning the "
+        "leaf judged wrong, because deleting a leaf in another repo is that "
+        "lane's call.",
+    ]
+    lines.extend(f"    {leaf_reading(leaf)}" for leaf in claimants)
+    lines.append(f"    pane real cwd (priority 1): {PANE_CWD_NOT_ACQUIRED}.")
+    return "\n".join(lines)
+
+
 def check_session_id_uniqueness(leaves: Sequence[Leaf]) -> list[Finding]:
     """Check 1: one session belongs to exactly one project (and one leaf)."""
 
@@ -332,10 +440,9 @@ def check_session_id_uniqueness(leaves: Sequence[Leaf]) -> list[Finding]:
             Finding(
                 "duplicate-session-id",
                 f"session_id {session_id} is claimed {scope}: {listed}. "
-                "One session belongs to one project. Which claim is real can be "
-                "decided from the session_file path in each runtime.json or from "
-                "the actual cwd of that pane; delete the leaf that does not "
-                "belong to its project.",
+                "One session belongs to one project; the leaf that does not "
+                "belong to its project is the one deleted."
+                + tiebreak_readings(claimants),
             )
         )
     return findings
@@ -433,7 +540,8 @@ def check_pane_ref_uniqueness(
                 f"pane_id={pane_id}) is claimed by more than one reachable leaf: "
                 f"{listed}.{rot} Two live agents contending for one pane means "
                 "delivery lands in a third party's session, silently; rebuild "
-                "the whole pane_ref, do not edit single fields.",
+                "the whole pane_ref, do not edit single fields."
+                + tiebreak_readings(claimants),
             )
         )
     return conflicts, stale
@@ -549,7 +657,11 @@ def check_project_self_consistency(leaves: Sequence[Leaf]) -> list[Finding]:
                         f"{leaf.where}/{SPEC_NAME} declares project_id "
                         f"{declared_id!r} but the sha256 prefix recomputed from "
                         f"realpath({declared_path}) is {expected_id!r}. The id is "
-                        "recomputed, never trusted as written.",
+                        "a derived value: the registration path must **compute** "
+                        "it, not accept it. Detecting a hand-copied id here is "
+                        "the weaker half of the fix — as long as the write path "
+                        "still takes a literal, this finding regenerates. "
+                        "`--print-project-id <repo>` prints the value to write.",
                     )
                 )
     return findings
@@ -614,6 +726,9 @@ def build_parser() -> argparse.ArgumentParser:
             "  duplicate-session-id     one session claimed by leaves in 2+ projects\n"
             "  pane-ref-conflict        one (multiplexer, session, pane_id) claimed by\n"
             "                           two *reachable* leaves = live mis-delivery risk\n"
+            "                           (both of the above print the readings a tiebreak\n"
+            "                           needs; the ruling is global and is not made here,\n"
+            "                           and the pane's real cwd is never auto-acquired)\n"
             "  half-registered          direction A (summary, no leaf) / B (leaf, no summary)\n"
             "  project-mismatch         spec.project.path != the repo hosting the leaf\n"
             "  project-id-mismatch      project_id != sha256 prefix of realpath(path)\n"
@@ -628,8 +743,10 @@ def build_parser() -> argparse.ArgumentParser:
             "\n"
             "exit codes:\n"
             "  0  registry consistent (a check count is printed; warnings may be listed)\n"
+            "     — also the exit code of --print-project-id\n"
             "  1  at least one consistency failure, or an unreachable project path\n"
-            "  2  global index missing / unparsable (fail closed, nothing checked)\n"
+            "  2  global index missing / unparsable (fail closed, nothing checked),\n"
+            "     or --print-project-id given a path that is not a directory\n"
         ),
     )
     parser.add_argument(
@@ -650,11 +767,42 @@ def build_parser() -> argparse.ArgumentParser:
             "in the global index"
         ),
     )
+    parser.add_argument(
+        "--print-project-id",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "print the project_id computed from realpath(PATH) and exit 0, "
+            "checking nothing else. This is the mechanical source the "
+            "self-registration write path uses instead of hand-copying a "
+            "literal: prevention beats the detection above. Exits 2 if PATH is "
+            "not an existing directory — realpath would happily digest a typo "
+            "into a plausible-looking id"
+        ),
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    if args.print_project_id is not None:
+        # Computation mode: answers "what must I write", so it must not depend on
+        # the registry being readable — the write path runs before there is
+        # anything to validate.
+        target = args.print_project_id.expanduser()
+        if not target.is_dir():
+            print(
+                f"cannot compute project_id: not an existing directory: {target}. "
+                "Fail closed rather than digest it anyway: realpath turns a typo "
+                "into a perfectly plausible id, which is exactly the failure this "
+                "mode exists to prevent."
+            )
+            return 2
+        print(project_id_for(target))
+        return 0
+
     index_path = args.global_index.expanduser()
 
     try:

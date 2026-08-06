@@ -6,6 +6,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
 ## [Unreleased]
 
 ### Added
+- **A mechanical tiebreak for cross-repo registry conflicts, because that class has no owner by
+  construction** (`agenttui-registry.md` §2.2.1, `validate_agenttui_registry.py`
+  `tiebreak_readings`, gate matrix row, +9 tests) — every high-severity conflict found on real data
+  was **between two repos**: repo A's leaf and repo B's leaf claiming the same pane, or the same
+  `session_id` claimed in both. "Each lane fixes its own" does not apply here: **each lane's leaf
+  reads as self-consistent, the conflict is only visible globally**, so the predictable outcome is
+  both sides believing the other is wrong, or both waiting for the other, and every conflict stalls.
+  The rule now fixes the input priority (**the pane's real cwd > each leaf's `session_file`
+  ownership > `last_seen`**), states that the ruling is made **once, globally**, and that its
+  product is a **named ruling** — which claim is legitimate, which leaf is deleted, and the readings
+  it rests on — handed to the lane owning the leaf judged wrong, since deleting a leaf in another
+  repo is that lane's call. The validator now prints those readings inline (each claimant's path,
+  `session_id`, `session_file`, `state`, `last_seen`, `pane_ref`) so a ruling can be made from the
+  report alone, and it still **does not rule**: reporting is not adjudicating.
+  The highest-priority input, the pane's real cwd, is deliberately **not acquired**: it needs a
+  pane-addressed multiplexer command, the only one that reliably reports pane existence *is the
+  focus command* (it can pull a human's view onto the pane), and the layout dump carries no
+  pane→pid mapping, so there is no read-only substitute. Per the methodology entry above, an
+  observation that perturbs what it observes must not hide in a validator that is run in bulk
+  (before and after every GC), so the reading prints as `unknown` **with its reason** and a human
+  supplies it. The mechanical proof that this changed nothing about what the script does to the
+  world: it executes **no external command at all**, and a test pins that.
+- **`validate_agenttui_registry.py --print-project-id <repo>`** — prints the `project_id` recomputed
+  from `realpath`, so the self-registration write path can *compute* the derived value instead of
+  copying a literal. Exits 2 when the path is not an existing directory: `realpath` would digest a
+  typo into a perfectly plausible id, which is the exact failure the mode exists to prevent. It
+  reads no global index, because registration happens before there is a registry to read.
 - **Methodology: a new observation must first prove it does not perturb what it observes**
   (`verification-and-gates.md`, beside the "some rules can only be born from an incident" entry) — the same
   shape hit this repo three times at three different levels in one session: collecting failure-classification
@@ -250,6 +277,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   (`generalization-boundary.md`).
 - **Close-out discipline** — decision-requests must carry structure; the impler converges by asking
   rather than re-delegating; ADR-0004 Residual tightened.
+
+### Changed
+- **`project_id` is computed at write time, not accepted as a literal** (`agenttui-registry.md`
+  §2.3 / §5 step 4, both `arborist-templates/` examples, +8 tests) — the real-data sweep found a
+  hand-copied `project_id` that does not recompute, alongside leaves declaring a project they do not
+  sit in. The cure for that family is **not** "correct the value": the registration path should
+  *compute* it from `realpath`, and an existing value that disagrees must **fail closed** rather
+  than be overwritten (overwriting also erases the only trace that there was ever a disagreement).
+  The send side already had this rule (ADR-0007 amendment); validating only on the send side amounts
+  to letting the wrong value be written first. The templates no longer offer a `<project-id>` blank
+  — **a blank is an invitation to hand-copy** — and instead name the value as derived and give the
+  command that prints it. Recorded in the guide as an instance of **prevention > detection >
+  judgement**: the validator can detect this, but as long as the write path accepts a literal, it
+  has permanent work, and every finding it reports was avoidable.
 
 ### Fixed
 - **A safety claim shipped one commit earlier was wrong** (`agenttui-registry.md` §3) — the previous entry

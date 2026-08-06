@@ -86,6 +86,7 @@ class RegistryFixture:
         state: str = "active",
         lineage: int | None = None,
         pane_ref: dict[str, str] | None = None,
+        last_seen: str | None = "2000-01-01T00:00:00+00:00",
         declared_project_path: Path | None = None,
         declared_project_id: str | None = None,
         omit_runtime: bool = False,
@@ -122,10 +123,11 @@ class RegistryFixture:
                 "session_id": session_id,
                 "session_file": str(self.base / "transcripts" / f"{session_id}.jsonl"),
                 "state": state,
-                "last_seen": "2000-01-01T00:00:00+00:00",
                 "generation": 1,
                 "pane_ref": pane_ref,
             }
+            if last_seen is not None:
+                runtime["last_seen"] = last_seen
             (directory / "runtime.json").write_text(
                 json.dumps(runtime), encoding="utf-8"
             )
@@ -790,6 +792,254 @@ class ProjectSelectionTests(FixtureTestCase):
         with redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
                 run_main("--glob", str(self.fixture.index_path))
+
+
+class CrossRepoTiebreakReadingsTests(FixtureTestCase):
+    """The two findings that span repos must carry the readings a ruling needs.
+
+    A cross-repo conflict has no owner by construction — each lane's own leaf is
+    self-consistent — so the report has to be sufficient on its own, and it has
+    to say that the ruling is global and is not made by the validator.
+    """
+
+    PANE = {"multiplexer": "mux", "session": "shared", "pane_id": "terminal_7"}
+
+    def _cross_repo_pane_conflict(self, **overrides: Any) -> tuple[str, Path, Path]:
+        self.fixture.add_project("repo-a")
+        self.fixture.add_project("repo-b")
+        leaf_a = self.fixture.register(
+            "repo-a",
+            "impler-one",
+            session_id="sid-a",
+            state="active",
+            pane_ref=dict(self.PANE),
+            **overrides,
+        )
+        leaf_b = self.fixture.register(
+            "repo-b",
+            "impler-two",
+            session_id="sid-b",
+            state="active",
+            pane_ref=dict(self.PANE),
+            **overrides,
+        )
+        index = self.fixture.flush()
+        code, out = run_main("--global-index", str(index))
+        self.assertEqual(code, 1, out)
+        return out, leaf_a, leaf_b
+
+    def test_pane_conflict_prints_every_reading_a_ruling_needs(self) -> None:
+        out, leaf_a, leaf_b = self._cross_repo_pane_conflict()
+        self.assertIn("pane-ref-conflict", out)
+        for leaf in (leaf_a, leaf_b):
+            self.assertIn(f"claimant {leaf}", out)
+        # session_id / session_file / state / last_seen / pane_ref, per claimant.
+        self.assertIn("session_id=sid-a", out)
+        self.assertIn("session_id=sid-b", out)
+        self.assertIn(str(self.base / "transcripts" / "sid-a.jsonl"), out)
+        self.assertIn(str(self.base / "transcripts" / "sid-b.jsonl"), out)
+        self.assertEqual(out.count("state=active"), 2)
+        self.assertEqual(out.count("last_seen=2000-01-01T00:00:00+00:00"), 2)
+        self.assertEqual(out.count("pane_id=terminal_7"), 3)  # 1 header + 2 claimants
+
+    def test_pane_conflict_states_the_priority_order(self) -> None:
+        out, _, _ = self._cross_repo_pane_conflict()
+        self.assertIn(VALIDATOR.TIEBREAK_PRIORITY, out)
+        # The order itself, not just that some inputs are listed.
+        cwd_at = out.index("the pane's real cwd")
+        session_file_at = out.index("session_file ownership")
+        last_seen_at = out.index("3) last_seen")
+        self.assertLess(cwd_at, session_file_at)
+        self.assertLess(session_file_at, last_seen_at)
+
+    def test_pane_conflict_says_the_ruling_is_global_and_not_made_here(self) -> None:
+        out, _, _ = self._cross_repo_pane_conflict()
+        self.assertIn("ONCE, GLOBALLY", out)
+        self.assertIn("does NOT", out)
+        self.assertIn("named one", out)
+        self.assertIn("another repo is that lane's call", out)
+
+    def test_pane_real_cwd_is_reported_unknown_with_its_reason(self) -> None:
+        out, _, _ = self._cross_repo_pane_conflict()
+        self.assertIn("pane real cwd (priority 1): unknown", out)
+        # The reason must be present, or "unknown" reads as a missing feature.
+        self.assertIn("focus command", out)
+        self.assertIn("read-only substitute", out)
+        self.assertIn("Supply this reading manually", out)
+
+    def test_duplicate_session_id_carries_the_same_readings(self) -> None:
+        self.fixture.add_project("repo-a")
+        self.fixture.add_project("repo-b")
+        leaf_a = self.fixture.register("repo-a", "impler-one", session_id="sid-shared")
+        leaf_b = self.fixture.register("repo-b", "impler-one", session_id="sid-shared")
+        index = self.fixture.flush()
+
+        code, out = run_main("--global-index", str(index))
+        self.assertEqual(code, 1, out)
+        self.assertIn("duplicate-session-id", out)
+        self.assertIn(VALIDATOR.TIEBREAK_PRIORITY, out)
+        self.assertIn(f"claimant {leaf_a}", out)
+        self.assertIn(f"claimant {leaf_b}", out)
+        self.assertIn("pane real cwd (priority 1): unknown", out)
+        # No pane_ref on either claimant: that must read as absent, not blank.
+        self.assertEqual(out.count("pane_ref=absent-or-unusable"), 2)
+
+    def test_absent_last_seen_reads_as_absent_not_blank(self) -> None:
+        # A blank in a ruling's evidence column would read as "checked, nothing
+        # there" when it actually means "never written".
+        out, _, _ = self._cross_repo_pane_conflict(last_seen=None)
+        self.assertEqual(out.count("last_seen=absent"), 2)
+        self.assertNotIn("last_seen=,", out)
+
+    def test_readings_do_not_make_the_validator_write(self) -> None:
+        # Reporting the readings must stay read-only: byte-for-byte unchanged
+        # even on a fixture that gives the run something to be tempted to fix.
+        out, _, _ = self._cross_repo_pane_conflict()
+        self.assertIn("pane-ref-conflict", out)
+        before = self._snapshot()
+        code, out = run_main("--global-index", str(self.fixture.index_path))
+        self.assertEqual(code, 1, out)
+        self.assertEqual(self._snapshot(), before)
+
+    def test_validator_runs_no_external_command(self) -> None:
+        """The mechanical proof that these readings added no observation.
+
+        Per verification-and-gates, a new observation must be shown not to
+        perturb what it observes. The strongest available form of that proof is
+        that this script executes nothing at all: the pane's real cwd is left
+        `unknown` precisely because acquiring it would need a command that can
+        move a human's view.
+        """
+
+        source = (ROOT / "overlay/scripts/validate_agenttui_registry.py").read_text(
+            encoding="utf-8"
+        )
+        for forbidden in ("import subprocess", "os.system", "os.popen", "shutil.which"):
+            self.assertNotIn(forbidden, source)
+        self.assertFalse(hasattr(VALIDATOR, "subprocess"))
+
+    def test_stale_handle_warning_carries_no_readings(self) -> None:
+        # The low-severity cleanup item has an owner (the leaf's own lane), so
+        # it needs no tiebreak block — and padding it would bury the real ones.
+        self.fixture.add_project("repo-a")
+        self.fixture.register(
+            "repo-a",
+            "impler-old",
+            session_id="sid-old",
+            state="stopped",
+            pane_ref=dict(self.PANE),
+        )
+        index = self.fixture.flush()
+
+        code, out = run_main("--global-index", str(index))
+        self.assertEqual(code, 0, out)
+        self.assertIn("stale-addressing-handle", out)
+        self.assertNotIn(VALIDATOR.TIEBREAK_PRIORITY, out)
+
+    def _snapshot(self) -> dict[str, bytes]:
+        return {
+            str(path.relative_to(self.base)): path.read_bytes()
+            for path in sorted(self.base.rglob("*"))
+            if path.is_file()
+        }
+
+
+class ComputeProjectIdModeTests(FixtureTestCase):
+    """`--print-project-id`: the write path computes the value instead of copying it."""
+
+    def test_print_project_id_matches_the_recomputed_value(self) -> None:
+        root = self.fixture.add_project("repo-a")
+        code, out = run_main("--print-project-id", str(root))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.strip(), project_id_for(root))
+
+    def test_print_project_id_needs_no_global_index(self) -> None:
+        # Self-registration happens before there is any registry to read.
+        root = self.fixture.add_project("repo-a")
+        missing_index = self.base / "nowhere" / "index.json"
+        code, out = run_main(
+            "--global-index", str(missing_index), "--print-project-id", str(root)
+        )
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.strip(), project_id_for(root))
+
+    def test_print_project_id_fails_closed_on_non_directory(self) -> None:
+        # realpath would digest a typo into a perfectly plausible id.
+        code, out = run_main("--print-project-id", str(self.base / "typo-repo"))
+        self.assertEqual(code, 2, out)
+        self.assertIn("not an existing directory", out)
+        self.assertNotIn(project_id_for(self.base / "typo-repo"), out)
+
+    def test_print_project_id_writes_nothing(self) -> None:
+        root = self.fixture.add_project("repo-a")
+        self.fixture.register("repo-a", "impler-one", session_id="sid-a")
+        self.fixture.flush()
+        before = {
+            str(path.relative_to(self.base)): path.read_bytes()
+            for path in sorted(self.base.rglob("*"))
+            if path.is_file()
+        }
+        code, _ = run_main("--print-project-id", str(root))
+        self.assertEqual(code, 0)
+        after = {
+            str(path.relative_to(self.base)): path.read_bytes()
+            for path in sorted(self.base.rglob("*"))
+            if path.is_file()
+        }
+        self.assertEqual(after, before)
+
+
+class WriteTimeProjectIdRuleTests(unittest.TestCase):
+    """The rule moved to write time: templates must offer no slot to hand-copy into."""
+
+    @staticmethod
+    def _read(relative: str) -> str:
+        return (ROOT / relative).read_text(encoding="utf-8")
+
+    def test_templates_offer_no_fillable_project_id_slot(self) -> None:
+        for relative in (
+            "overlay/arborist-templates/agents/example/spec.json",
+            "overlay/arborist-templates/index.json",
+        ):
+            raw = self._read(relative)
+            self.assertNotIn('"<project-id>"', raw, relative)
+            document = json.loads(raw)
+            value = (
+                document["project"]["project_id"]
+                if "project" in document
+                else document["projects"][0]["project_id"]
+            )
+            self.assertIn("computed-from-realpath", value, relative)
+            self.assertIn("not-a-fill-in-slot", value, relative)
+            self.assertIn("--print-project-id", value, relative)
+
+    def test_guide_moves_the_rule_to_write_time(self) -> None:
+        guide = self._read("overlay/spec/guides/agenttui-registry.md")
+        self.assertIn("规则前移到写入时", guide)
+        self.assertIn("预防 > 检测 > 判断", guide)
+        self.assertIn("--print-project-id", guide)
+        # Self-registration step 4 is the landing point, and an existing
+        # mismatching value must fail closed rather than be overwritten.
+        self.assertIn("已有值与重算不符 ⇒ fail closed", guide)
+
+    def test_guide_states_the_cross_repo_tiebreak(self) -> None:
+        guide = self._read("overlay/spec/guides/agenttui-registry.md")
+        self.assertIn("跨仓冲突的机械 tiebreak", guide)
+        self.assertIn("判定必须在全局做", guide)
+        self.assertIn("具名裁定", guide)
+        self.assertIn("真实 cwd", guide)
+        self.assertIn("不裁定、不删、无 `--fix`", guide)
+
+    def test_gate_matrix_row_mentions_the_readings_and_the_computed_id(self) -> None:
+        gates = self._read("overlay/spec/guides/verification-and-gates.md")
+        row = next(
+            line
+            for line in gates.splitlines()
+            if line.startswith("|") and "AgentTUI 注册表一致性" in line
+        )
+        self.assertIn("裁定所需读数", row)
+        self.assertIn("--print-project-id", row)
+        self.assertIn("不执行任何外部命令", row)
 
 
 if __name__ == "__main__":

@@ -60,7 +60,11 @@ cp "$SRC/scripts/arborist_brand_capacity.py" "$ROOT/.trellis/scripts/"; chmod +x
 #   validate_agenttui_registry.py   —— AgentTUI 注册表一致性：session_id / pane_ref 全局唯一、
 #                                      half-registered 两方向、leaf 的 project 字段自洽
 #                                      （project_id 照 realpath 重算）、index 摘要与 leaf 一致。
-#                                      **纯只读、无 --fix**：跨项目删别人 leaf 属别的 lane。
+#                                      **纯只读、无 --fix、不执行任何外部命令**：跨项目删别人 leaf
+#                                      属别的 lane；跨仓冲突的两类高危发现自带裁定所需读数，
+#                                      裁定在全局一次做出（真实 cwd 不自动取，会抢焦点）。
+#                                      另有 --print-project-id <repo>：自登记写入路径据此**计算**
+#                                      派生的 project_id，而不是手抄一个字面值。
 #                                      它不靠 __file__ 推仓根，读的是全局 `~/.arborist/index.json`
 #                                      （`--global-index` 可改），故放哪一级都能跑。
 # 前三个靠 __file__.parents[2] 定位 repo root，须放 .trellis/scripts/（两级深）；
