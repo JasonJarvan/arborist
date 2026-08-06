@@ -35,6 +35,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   the seven-value upgrades are, for now, a human reading rather than a mechanical one.
 
 ### Changed
+- **Two tmux-transport gaps closed by one human-present smoke test, and the migration itself withdrawn**
+  (`agenttui-registry.md` §3 gap list) — the entries "the no-focus-theft claim is only proven at the server
+  state layer, not with a client attached" and "the submit-key semantics were never verified against a real
+  ATUI" are both now measured. With target ATUIs living in tabs the human was **not** looking at, delivery
+  left the outer active tab **byte-identical** and both targets' pane-active flags unchanged, with a client
+  attached; and sending the contract byte for Enter put each brand's envelope nonce into its own session
+  record. Recorded alongside, because it is the easier reading to reach for and it is wrong: **this does not
+  show that tmux fixes the composer-not-submitting problem.** The variables were not controlled on the
+  painful case — the message was short and the targets idle, and each of those has already been shown
+  independently sufficient for success on the other multiplexer too. Proving anything about long envelopes
+  or busy targets requires re-measuring under exactly those conditions. Also recorded as a method: both gaps
+  had sat unverified not because measuring was hard but because **measuring required interrupting a person**,
+  so the right moment to clear that class of gap is while the person is already present — scheduling it
+  separately means the interruption cost defers it indefinitely.
+  With focus theft judged an **acceptable cost** by the owner (a human present can absorb the interruption),
+  the last standing reason to migrate is gone and the migration is **withdrawn**: the transport stays in the
+  tree, dormant (nothing declares that multiplexer, so routing never reaches it) and zero-behaviour-change,
+  and no launcher change is made. The withdrawal is deliberately recorded as "the cost was accepted", **not**
+  "the evidence refuted it" — if unattended operation later becomes common, focus theft regains its cost and
+  the case re-opens without needing to be re-argued.
 - **Pane reachability and current Codex turn activity are now two separate readings**
   (`agenttui.py` `derive_codex_submit_activity` / `build_pane_route`, `agenttui-registry.md` §3 rule 1,
   ADR-0007 Amendment 3, +12 tests) — the submit key used to be chosen from the *reachability* state, which
