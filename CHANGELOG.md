@@ -293,6 +293,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   has permanent work, and every finding it reports was avoidable.
 
 ### Fixed
+- **The tiebreak shipped one commit earlier rested on a false premise: "cross-repo duplicate = stray
+  registration, delete the wrong one"** (`agenttui-registry.md` §2.2.1, `validate_agenttui_registry.py`
+  wording, +2 tests) — reading the leaves' actual contents (rather than judging from the finding alone)
+  showed most cross-repo duplicate claims are **self-declared, authorised cross-repo mirror
+  registrations**: the leaf names its authoritative entry, why it exists, and who authorised it, and its
+  declared project path deliberately points at the repo where that agent really works. Deleting such a
+  leaf removes the *only* way another repo can reach that agent. So the guide now makes callers **judge
+  the kind of duplication before judging which side is wrong**, and states the real conclusion: the
+  root cause is a **schema gap**, not dirty data — the global-uniqueness rule has no first-class exception
+  for cross-repo reachability, so a legitimate need can only be expressed by *looking* like a duplicate,
+  which the validator must then report as high severity. Until that field exists, the high-severity report
+  on a self-declared mirror is a **known false positive** whose handling is "issue a named ruling, delete
+  nothing". One risk is recorded as surviving the reclassification: mirrors share a pane handle, so
+  delivery lands on the same real target *today*, but becomes a genuine silent misdelivery once that pane
+  is reused — a mirror's pane handle must therefore expire together with the authoritative entry's.
+- **Tiebreak input #2 was written as a universal rule but is brand-dependent** (same files) — "decide
+  ownership from the session_file path" holds only for a brand that stores sessions in per-project
+  directories. Another brand keeps rollout logs in a single global directory, so its session-file path
+  carries **no** ownership information and using it would produce confident wrong rulings; the substitute
+  reading is the cwd the session records about itself in its first rollout entry. Both the guide and the
+  validator's inline text now scope this input by brand, pinned by a test.
 - **A safety claim shipped one commit earlier was wrong** (`agenttui-registry.md` §3) — the previous entry
   justified measuring the already-focused case with "probing the pane you occupy steals nobody's focus".
   That reasoning conflates *the process runs in this pane* with *this pane is the client's focus*; *process

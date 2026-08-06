@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import inspect
 import io
 import json
 import sys
@@ -1040,6 +1041,33 @@ class WriteTimeProjectIdRuleTests(unittest.TestCase):
         self.assertIn("裁定所需读数", row)
         self.assertIn("--print-project-id", row)
         self.assertIn("不执行任何外部命令", row)
+
+
+
+class MirrorRegistrationWordingTests(unittest.TestCase):
+    """Judge the *kind* of duplication before judging which side is wrong.
+
+    Measured: most cross-repo duplicate claims were self-declared, authorised
+    mirror registrations, not stray data -- the leaf names its authoritative
+    entry and why it exists. Telling the reader to "delete the one that does not
+    belong to its project" would destroy another repo's only way to reach that
+    agent. The report must therefore not prescribe deletion unconditionally.
+    """
+
+    def test_duplicate_session_id_does_not_prescribe_unconditional_deletion(self) -> None:
+        module = load_validator_module()
+        source = inspect.getsource(module)
+
+        self.assertNotIn("is the one deleted", source)
+        self.assertIn("declares itself", source)
+
+    def test_tiebreak_priority_marks_session_file_as_brand_dependent(self) -> None:
+        # One brand stores sessions per project (the path *is* evidence); another
+        # keeps rollout logs in one global directory (the path proves nothing).
+        module = load_validator_module()
+
+        self.assertIn("BRAND-DEPENDENT", module.TIEBREAK_PRIORITY)
+        self.assertIn("records about itself", module.TIEBREAK_PRIORITY)
 
 
 if __name__ == "__main__":
