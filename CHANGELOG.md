@@ -6,6 +6,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
 ## [Unreleased]
 
 ### Added
+- **Sender-side consumption of the submit ack — the one thing that stops an accepted message being sent
+  twice** (`agenttui.py` `read_submit_ack` + `ACK_STATUS_*`, `agenttui-registry.md` §3, +5 tests) — the
+  receiver-side ack shipped earlier had no consumer, so the guarantee existed only for a human reading the
+  table by hand. Now every pane delivery reports `ack_status` (on success too, because the value of the pair
+  is in the *combination*), and exactly one behaviour changes: when the ack says the receiver's hook fired
+  but the transcript nonce has not surfaced, the retry is **suppressed**. That combination is unreadable
+  from the transcript alone — it looks identical to "never submitted" — and the old code pressed submit
+  again in both cases, i.e. it duplicated accepted messages. Three fail-safe properties are pinned by
+  tests: `table-unreadable` stays a **separate value** from `unconfirmed` ("I could not look" and "I looked
+  and found nothing" license different actions, and a missing ack module is the former — the facility may
+  simply not be adopted here); a missing ack never *blocks* the single retry the contract already allows
+  (the one-sided direction is that absence can only downgrade to unconfirmed, never assert not-submitted
+  and never forbid); and a failed lookup can never fail the delivery — the observation must not change the
+  delivery it observes.
+- **A sixth delivery failure shape, found by walking into it: the target is not ready yet**
+  (`agenttui-registry.md` §3) — a delivery to a freshly spawned ATUI read back unverified; the screen dump
+  showed the pane still running a package-manager self-update (the installer's own progress output on screen), i.e. **the CLI had not taken over the
+  terminal** and the bytes went to the shell in front of it. Its reading is identical to the other five,
+  but its handling is the opposite of all of them: **waiting works** — it is the only shape where it does
+  (waiting never fixes a sandbox, an expired credential, a truncated composer write, or a corrupted
+  envelope). Conflating it therefore produces two opposite errors: treated as one of the others, a target
+  that only needed a moment is abandoned; treated as this one, a permanently broken target is waited on
+  forever. The readiness criterion is required to be **causal**, not observational: "the screen looks like a
+  composer" is guesswork, whereas **"the target has completed self-registration"** is an action the target
+  itself performed, which proves the CLI is up, can read the harness, and can write files — the same
+  reasoning as the ack. Hence a launch-side invariant: **do not deliver to a spawned ATUI before its
+  self-registration completes.** This also names a previously unattributed failure class — a newly spawned
+  ATUI has a readiness window during which any delivery lands in the void, indistinguishable from a broken
+  target. (The launcher's own wait-for-binary retry protects the launcher, not the sender.)
+  Recorded as the third falsification of "the known-cause set is complete" (three shapes → five → six),
+  which is the concrete payoff of having insisted on keeping the `unclassified` bucket.
 - **Receiver-side submit-ack handshake: a causal delivery reading next to the existing bystander one**
   (`overlay/scripts/agenttui_submit_ack.py`, `overlay/hook-templates/submit-ack/`,
   `agenttui-registry.md` §3 rule 8, one `[local]` injection entry, +28 tests) — the only delivery

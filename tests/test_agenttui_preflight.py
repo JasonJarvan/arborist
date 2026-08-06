@@ -2456,5 +2456,153 @@ class TmuxContractWordingTests(unittest.TestCase):
         self.assertIn("attach", guide)
 
 
+
+class SubmitAckConsumptionTests(unittest.TestCase):
+    """Rule 8 on the sender side: the ack decides whether a retry is safe.
+
+    The transcript alone cannot separate "never submitted" from "submitted, not
+    yet flushed". The old code pressed submit again in both cases, so it
+    duplicated accepted messages. An ack resolves exactly that pair.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.session_file = Path(self.temporary.name) / "target.jsonl"
+        self.session_file.write_text("existing line\n", encoding="utf-8")
+        self._real = AGENTTUI.read_submit_ack
+        self.addCleanup(setattr, AGENTTUI, "read_submit_ack", self._real)
+        self._window = AGENTTUI.PANE_VERIFY_WINDOW_SECONDS
+        AGENTTUI.PANE_VERIFY_WINDOW_SECONDS = 0.0
+        self.addCleanup(
+            setattr, AGENTTUI, "PANE_VERIFY_WINDOW_SECONDS", self._window
+        )
+
+    def fake_ack(self, status: str):
+        AGENTTUI.read_submit_ack = lambda nonce, **kw: {
+            "ack_status": status,
+            "ack_count": 1 if status == AGENTTUI.ACK_STATUS_ACKED else 0,
+            "ack_detail": "fake",
+        }
+
+    def send(self, *, brand: str = "claude-code", state: str = "idle"):
+        transport = FakeTransport()
+        route = AGENTTUI.DeliveryRoute(
+            mode=AGENTTUI.ROUTE_PANE,
+            cwd=Path(self.temporary.name),
+            transport=transport,
+            pane_ref=pane_ref(),
+            pane_text="envelope body",
+            submit_byte=AGENTTUI.PANE_ENTER_BYTE,
+        )
+        payload = {
+            "target": TARGET,
+            "target_brand": brand,
+            "target_effective_state": state,
+            "target_submit_activity": None,
+            "target_session_file": str(self.session_file),
+            "delivery_marker": "marker-never-present",
+            "nonce": NONCE,
+        }
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(
+            io.StringIO()
+        ):
+            AGENTTUI.send_via_pane(route, payload, timeout=None, submit_delay=0.0)
+        return transport, json.loads(stdout.getvalue().strip().splitlines()[-1])
+
+    def test_an_ack_suppresses_the_second_submit(self) -> None:
+        # The regression that matters: an accepted-but-unflushed envelope must
+        # not be submitted twice.
+        self.fake_ack(AGENTTUI.ACK_STATUS_ACKED)
+
+        transport, result = self.send()
+
+        self.assertEqual(1, len(transport.keys))
+        self.assertEqual(AGENTTUI.DELIVERY_SUBMIT_UNVERIFIED, result["delivery"])
+        self.assertEqual(AGENTTUI.ACK_STATUS_ACKED, result["ack_status"])
+
+    def test_no_ack_still_allows_the_documented_retry(self) -> None:
+        # Absence must not *block* the retry either -- it is unconfirmed, and the
+        # existing single retry stays available.
+        self.fake_ack(AGENTTUI.ACK_STATUS_UNCONFIRMED)
+
+        transport, result = self.send()
+
+        self.assertEqual(2, len(transport.keys))
+        self.assertEqual(AGENTTUI.ACK_STATUS_UNCONFIRMED, result["ack_status"])
+
+    def test_an_unreadable_table_is_not_treated_as_absence(self) -> None:
+        # "I could not look" must stay distinct from "I looked and found nothing".
+        self.fake_ack(AGENTTUI.ACK_STATUS_UNAVAILABLE)
+
+        _transport, result = self.send()
+
+        self.assertEqual(AGENTTUI.ACK_STATUS_UNAVAILABLE, result["ack_status"])
+        self.assertNotEqual(AGENTTUI.ACK_STATUS_UNCONFIRMED, result["ack_status"])
+
+    def test_the_reading_is_reported_on_success_too(self) -> None:
+        # The pair's value is in the combination, so success reports it as well.
+        self.fake_ack(AGENTTUI.ACK_STATUS_ACKED)
+        marker = "marker-present"
+
+        class FlushingTransport(FakeTransport):
+            """Appends the marker when the submit key lands, like a real target.
+
+            The marker has to appear *after* the pre-send byte boundary: only a
+            nonce past that boundary counts as delivery evidence, so seeding the
+            file up front would prove nothing.
+            """
+
+            def __init__(self, path: Path) -> None:
+                super().__init__()
+                self._path = path
+
+            def send_key(self, pane_ref, key_byte, *, cwd=None, timeout=None):
+                outcome = super().send_key(pane_ref, key_byte, cwd=cwd, timeout=timeout)
+                with self._path.open("a", encoding="utf-8") as handle:
+                    handle.write(f"line with {marker}\n")
+                return outcome
+
+        transport = FlushingTransport(self.session_file)
+        route = AGENTTUI.DeliveryRoute(
+            mode=AGENTTUI.ROUTE_PANE,
+            cwd=Path(self.temporary.name),
+            transport=transport,
+            pane_ref=pane_ref(),
+            pane_text="body",
+            submit_byte=AGENTTUI.PANE_ENTER_BYTE,
+        )
+        payload = {
+            "target": TARGET,
+            "target_brand": "claude-code",
+            "target_effective_state": "idle",
+            "target_submit_activity": None,
+            "target_session_file": str(self.session_file),
+            "delivery_marker": marker,
+            "nonce": NONCE,
+        }
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(
+            io.StringIO()
+        ):
+            AGENTTUI.send_via_pane(route, payload, timeout=None, submit_delay=0.0)
+        result = json.loads(stdout.getvalue().strip().splitlines()[-1])
+
+        self.assertEqual(AGENTTUI.DELIVERY_DELIVERED, result["delivery"])
+        self.assertEqual(AGENTTUI.ACK_STATUS_ACKED, result["ack_status"])
+
+    def test_a_missing_ack_module_reads_as_unavailable_not_absence(self) -> None:
+        # The facility may simply not be adopted here; that says nothing about
+        # whether the target submitted.
+        original = AGENTTUI.ACK_MODULE_NAME
+        AGENTTUI.ACK_MODULE_NAME = "no-such-ack-module.py"
+        self.addCleanup(setattr, AGENTTUI, "ACK_MODULE_NAME", original)
+
+        reading = self._real(NONCE)
+
+        self.assertEqual(AGENTTUI.ACK_STATUS_UNAVAILABLE, reading["ack_status"])
+
+
 if __name__ == "__main__":
     unittest.main()
