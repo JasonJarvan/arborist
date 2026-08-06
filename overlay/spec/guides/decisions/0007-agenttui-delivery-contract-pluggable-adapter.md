@@ -1,6 +1,6 @@
 # ADR-0007: AgentTUI 活 pane 投递 — 契约进规范，具体传输作可插拔 adapter
 
-- **Status**: accepted（rootorc harness 自开发，authored + ratified；**amended 2026-07-29**，见文末 Amendment）
+- **Status**: accepted（rootorc harness 自开发，authored + ratified；**amended 2026-07-29 / 2026-07-30 / 2026-08-05**，见文末各 Amendment）
 - **Origin**: dogfood — 下游 adopter 实证出活 pane 投递缺口并先行实现，上游 rootorc 收敛为契约
 - **Date**: 2026-07-27
 
@@ -150,3 +150,47 @@ Arborist 注册表刻意 **transport 中立**（剥离了 CCB 全部 tmux/pane/s
 ### 三门仍成立 / 为何是 amendment
 
 难逆（「什么时候拒绝投递」被所有 adapter 与编排共依）、反直觉（「记下版本就能应对版本差异」看着显然，实则该字段无人读；而真正缺的是一个每次投递必经的检查点）、真权衡（规则 6 让失败从「静默走一条不可靠的路」变成「响亮拒绝」，代价是未登记 `pane_ref` 的 peer 会立刻从「看似可投」变成「明确不可投」，须与 `pane_ref` 覆盖率补齐同批落地）。核心决策未动，故为 amendment。
+
+## Amendment 3（2026-08-05）—— 可达态与 submit 态分离；结果按已执行动作分类；resume 生命周期 detach
+
+**动因**：一个下游采纳仓把三笔修复 dogfood 到可用后请求上游收敛。上游逐笔判定通用性，只把与具体产品/路径无关的部分收进契约。**规则 2（不盲目重发）、规则 3 的目的（message-specific、绝不假阳性）、规则 5/6 均不变**；本条**更正规则 1**、**取代规则 4 的值域**、**新增规则 7**。证据等级逐条标注。
+
+### A. 更正规则 1：把「可达」与「正在跑 turn」拆成两个取值（**取代**原规则 1 的活性来源）
+
+原规则 1 说「活性取自读时派生态」，把两件事压成一个值：
+
+| 轴 | 回答什么 | 取自 |
+|---|---|---|
+| **可达 / liveness** | 该走活 pane 还是 stopped-session resume | 声明态 + transcript 新鲜度（ADR-0002 派生态，不变）|
+| **submit 态** | 现在**是否正在执行一个 turn** ⇒ 发 Tab 还是 Enter | **目标 transcript 的最新完整 turn-boundary 事件** |
+
+**为何必须分开（双向实测，下游采纳仓 dogfood；上游未独立复现）**：
+1. 刚跑完一个 turn 的目标仍在新鲜窗口内 ⇒ 按新鲜度判「活跃」会把 **Tab 发给空闲 composer**，Tab 在空闲态**什么也不入队**，信封留在输入框；
+2. 反向：真忙目标的 Tab 入队后，nonce 要到 turn 结束才出现 ⇒ **早期 grep miss 不是非送达证据**，据它重投会产生**重复决策**。
+
+**新增的机械要求**：`task_started`=active / `task_complete`=idle；取不到可信 boundary ⇒ 注入前 fail closed，**不得**用新鲜度猜键；**未以换行终止的 JSONL 尾记录 = unknown**，不得跳过它复用更早 boundary；**settle 延迟后、按键前再刷新一次**（turn 可能在写入与提交之间结束）；idle 的 Enter 补发前须再确认仍 idle。**Claude Code 不读 boundary、一律 Enter（不变）。**
+
+**另加一条写入方式的对因修法**：Codex 的信封须按**终端标准 bracketed paste 一次性成帧**写入。下游实测（某一 Codex 版本）：裸高速按键流被归类为 paste burst，burst 未结束时 **Enter 被当成 composer 换行而不是提交** ——目标机械 idle、两次键命令 rc=0、信封仍滞留；成帧后 nonce 约一秒后出现。**契约层只表达「本次写入需成帧」这一能力意图，成帧机制属 adapter**（有原生 paste 原语者应改用它）。**按 brand 白名单开启，无实测不加**——它是「写入方式」层的修法，**与路由、复用器选择无关**，也**不声称**覆盖沙箱或认证类失败。
+
+### B. 取代规则 4 的值域：一个 unverified 桶混装了处置相反的结果
+
+原规则 4 只有 `queued-unverified` 一格。**问题不是名字不好，是它把处置互相矛盾的情形合并了**：等 turn 边界 / 恢复 composer 里已有的文本 / 去查一条没回话的命令——调用方无法知道自己在哪一格。⇒ 结果**按已执行的动作**展开为七值（外加规则 6 的 `no-operational-route` = 「没发出去」那一格）：`pre-injection-rejected` / `delivered` / `queued-for-next-turn` / `submit-unverified` / `composer-unsubmitted` / `write-unverified` / `submit-command-unverified`，逐值语义与调用方动作见 `agenttui-registry.md` §3 规则 4 的表。
+
+- 每条结果必须带 `submit_action` / `recommended_action` / `verification_guidance` / `retry_safe` / nonce / message-specific `evidence` / `acknowledged=false`。
+- **`retry_safe=true` 只允许出现在机械可证「零 pane 命令」的路径上**（`pre-injection-rejected`、`no-operational-route`）。**命令失败 ≠ 零副作用**：非零或超时的命令可能已经产生副作用，故一切 `*-unverified` 均为 false。
+- **禁止预测式命名**（`will-land` / `stranded`）：名字只许说已经做过什么。
+- **fail-closed 必须连相位一起写**：unknown 发生在写入前 / 写入后 / 首次 Enter 后，三种处置不同（见 §3 规则 5 的相位表）。
+- **边界（不得虚报）**：七值分的是**动作**，不是**病因**。形态 2（认证失效）与形态 3（截断未提交）仍共享 `submit-unverified`——要分开它们需要读屏分类器，那**不在本 Amendment 内**。
+
+### C. 新增规则 7：resume transport 不得握有目标 turn 的生杀权
+
+`codex exec resume` / `claude -p --resume` 的进程承载目标**整个 turn**，不是一条有界的「写消息」命令。把它跑在发送方 timeout 之下 = **让发送方的耐心成为目标的 deadline**：一次发送侧观察超时会 SIGKILL 一个正常工作的 runner，中断一个可能已写过文件、已调用过外部系统的 turn。
+
+⇒ **必须 detached（独立 process session）启动、断开发送方 stdin，`--timeout` 只限制 nonce 观察窗，观察结束不得 terminate/kill runner**；结果为 `delivered`（仍只证明 transport entry，须标 `task_completion=unverified`）/ `resume-started-unverified` / `resume-exited-unverified`，三者 `retry_safe` 均为 false；**runner 退出（哪怕 rc=0）不证明零副作用**。
+
+- **与「resume 是显式 opt-in」正交（这一点曾被误判为「问题已不存在」）**：Amendment 2 的规则 6 只改了**谁来选**这条路（必须显式选择、不得静默回落），**没有**改选中之后**谁掌握它的生命周期**。opt-in 之后被 SIGKILL 的 turn 与之前一样会被中断。
+- **runner 输出不得接管道**（上游在 port 时新增的判定，非下游原修法）：被放弃的 runner 若管道缓冲写满，会**卡在目标的 turn 里面**——同一类 bug 的更安静版本。落文件、并把位置如实报出；**也不该直接丢弃**，因为 `-p` 形态下 runner 的 stdout 是目标回复唯一出现的地方。
+
+### 三门仍成立 / 为何是 amendment
+
+难逆（结果值域与「什么时候不许重投」被所有 adapter 与编排共依，且 `retry_safe` 是自动化重试的判据）、反直觉（「转录还新鲜所以它正在跑」看着显然，实则一个刚结束的 turn 与一个正在跑的 turn 在新鲜度上不可区分；「发送方 timeout 到了就该收拾自己起的进程」也看着显然，实则那个进程是**目标的** turn）、真权衡（分离 submit 态让「读不出 boundary 的 Codex 目标」从「蒙一个键」变成「投不出去」，诚实但更严；七值让调用方代码要处理更多分支，换来的是它们**能**做出正确处置）。核心决策未动——投递仍是受契约约束的可插拔 adapter、core 仍 transport 中立、submit 路由仍 brand-keyed、fail-closed 仍在，故为 amendment。

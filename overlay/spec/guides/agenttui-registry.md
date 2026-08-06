@@ -170,41 +170,75 @@
 
 **投递契约（规范性 · 任何活 pane 投递 adapter 必须满足 · 权威见 [ADR-0007](./decisions/0007-agenttui-delivery-contract-pluggable-adapter.md)）**：往活 pane 注入字节把消息送进对方 transcript，是通道①之外**送达侧新增的一类更可靠选项**（记录⊥送达正交不变：durable 内容仍必留信）。core 只规定以下契约、保持 transport 中立；具体终端复用器（zellij 等）与字节注入实现是 **opt-in 参考 adapter，不在 core**。任何投递 adapter 必须满足：
 
-1. **brand + 活性感知的 submit 路由**：活性取自 §3 读时派生态（contradiction 按活跃处理）。
-   - 有效**活跃** + `brand=codex` → 写入信封后**发一次 Tab（byte `9`）入队**到下一 turn，**不 steer** 当前 turn（让当前 turn 先跑完，防外部 agent 把决策注入到实现进行到一半之中）；
-   - **空闲 Codex** → 发 **Enter（byte `13`）** 提交；
-   - **Claude Code** → **不分活性一律 Enter 提交**。**为何不照搬 Codex 的 Tab**（#12 官方补充裁定）：Claude Code 官方 keybinding 只有 `chat:submit`=Enter，其 Tab 用于 autocomplete / tab 导航，**没有 Codex-Tab 那样的独立「入队到下一 turn」动作**；目标忙碌时由 **Claude Code 自身的 receiver-side queue** 在当前 turn 跑完后处理，故活跃/空闲都用 Enter。**⚠️ 勿给 Claude Code 套用 Codex 的 Tab**——那会落进 autocomplete/导航语义、不入队提交，是误改。
+1. **brand + submit 态感知的 submit 路由 —— 而「可达态」与「submit 态」必须分开取值**：
+   - **⚠️ 可达 ≠ 正在跑 turn（这条曾被合成一个值，是一个已实测的错）**：§3 读时派生态（含 contradiction）只回答**「该走活 pane 还是 stopped-session resume」**——它描述「**最近可达**」，**不证明当前 turn 正在执行**。刚跑完一个 turn 的目标仍落在新鲜窗口内，按新鲜度当「活跃」就会把 **Tab 发给一个空闲 composer**：Tab 在空闲态**什么也不入队**，信封留在输入框里不提交（下游实测；反向亦已实测：真忙目标的 Tab 入队后 nonce 到 turn 结束才出现，早期 grep miss 被当成失败而重投 ⇒ 重复决策）。
+   - **Codex 的 submit 态必须另从目标 transcript 的最新完整 turn-boundary 事件取得**（`event_msg.payload.type`）：`task_started` = **active** → 发一次 **Tab（byte `9`）** 入队到下一 turn，**不 steer** 当前 turn（让当前 turn 先跑完，防外部 agent 把决策注入到实现进行到一半之中）；`task_complete` = **idle** → 发 **Enter（byte `13`）** 立即提交。
+   - **取不到可信 boundary ⇒ 注入前 fail closed**，**不得**拿 transcript 新鲜度猜提交键（fail-closed 的相位与结果值见规则 5）。
+   - **非空但未以换行终止的 JSONL 尾记录 = unknown**，**不得**跳过它去复用更早的 boundary——那会自信地报出「这条记录写入之前」的状态。
+   - **pane settle 延迟结束后、真正按键前必须再读一次**：turn 可能恰好在「写入」与「提交」之间结束，此时计划中的 Tab 已经不再正确。
+   - **Claude Code** → **不分活性一律 Enter 提交，且不读 turn boundary**。**为何不照搬 Codex 的 Tab**（#12 官方补充裁定）：Claude Code 官方 keybinding 只有 `chat:submit`=Enter，其 Tab 用于 autocomplete / tab 导航，**没有 Codex-Tab 那样的独立「入队到下一 turn」动作**；目标忙碌时由 **Claude Code 自身的 receiver-side queue** 在当前 turn 跑完后处理，故活跃/空闲都用 Enter。**⚠️ 勿给 Claude Code 套用 Codex 的 Tab**——那会落进 autocomplete/导航语义、不入队提交，是误改。
+   - **写入方式：Codex 的信封必须按「一次性成帧粘贴」写入**（终端标准 bracketed paste `ESC[200~` / `ESC[201~`），**不得**把整封信当高速按键流裸写。下游实测（某一 Codex 版本）：裸写会被归类为 paste burst，burst 未结束时 **Enter 的行为是往 composer 追加换行而不是提交** —— 目标机械判定为 idle、两次提交键命令均 rc=0，信封仍滞留 composer；改用成帧粘贴后 nonce 约一秒后出现。**这是「写入方式」层的对因修法（形态 3），与路由、复用器选择无关**——契约层只问「本次写入是否需要成帧」，成帧**机制**属 transport（有原生 paste 原语的 transport 应改用它）。
+     - **成帧是按 brand 的白名单，不是无条件**：只对已有实测支持的 brand 开（当前仅 codex）。其它 brand 的 composer 可能有自己的 paste 处理，**无实测就不加**（同名 ≠ 同能力）。
    - 与 [ADR-0006](./decisions/0006-runtime-brand-is-routing-authority.md) 一致：submit-key 路由本身即 brand-keyed，是「按实际 brand 路由」在投递维度的延伸。
 2. **不盲目重发入队键**：送达未观测到时**不得**重发 Tab——盲目重发会入队重复信封。
+   - **idle Codex 的一次 Enter 未验证时，补发 Enter 前必须再次确认 submit 态仍为 idle**；已变 active 或 unknown 就停止（`submit-unverified`），**不得** steer 一个刚开始的 turn。Claude Code 的补发不受此限（其 receiver-side queue 负责排队）。
 3. **送达证据必须 message-specific（fail-closed，绝不假阳性）**：每次发送生成**唯一 nonce** 写入信封；注入前记录目标 transcript 的**位置指纹 = inode + size**（不是裸字节偏移）。验证时分两路，并**显式标注证据等级**：
    - 指纹**可核对**（inode 未变、size 未缩小）→ 在字节边界**之后**搜 nonce，命中即 `delivered`，证据等级 `evidence=envelope-nonce-found-after-boundary`（强）。
-   - 指纹**不匹配**（inode 变 / size 变小 / 无法核对）⇒ 目标会话文件**被重写**，字节偏移不再对应「投递后新增」→ **降级为全文件 nonce 搜索**，命中即 `delivered`，证据等级 `evidence=envelope-nonce-found-fullfile`（弱于 after-boundary，但**仍是送达证据**）；**不得**因指纹不匹配就直接返回 `queued-unverified`。
-   - **「transcript 单调 append」不是可依赖的不变量**：Claude Code 的 **compact / rollout 重写**会原地重写会话文件。**实测**（一个 adopter 实例的 dogfood 巡检；上游 gardener 未独立复现）：一次投递后全文件 grep 到该 nonce 多次、目标输入框已清空（**确实送达**），但按边界做 `tail -c +N` 检测得 **0 次**——目标刚做过 compact、文件被重写。裸边界检测在此产生**假阴性**（实为送达、判为未送达），而假阴性会让调用方据 `queued-unverified` **重发** ⇒ **重复投递**，正是规则 2 要防的事。
+   - 指纹**不匹配**（inode 变 / size 变小 / 无法核对）⇒ 目标会话文件**被重写**，字节偏移不再对应「投递后新增」→ **降级为全文件 nonce 搜索**，命中即 `delivered`，证据等级 `evidence=envelope-nonce-found-fullfile`（弱于 after-boundary，但**仍是送达证据**）；**不得**因指纹不匹配就直接返回一个未验证值（规则 4 的 `submit-unverified` 等）。
+   - **「transcript 单调 append」不是可依赖的不变量**：Claude Code 的 **compact / rollout 重写**会原地重写会话文件。**实测**（一个 adopter 实例的 dogfood 巡检；上游 gardener 未独立复现）：一次投递后全文件 grep 到该 nonce 多次、目标输入框已清空（**确实送达**），但按边界做 `tail -c +N` 检测得 **0 次**——目标刚做过 compact、文件被重写。裸边界检测在此产生**假阴性**（实为送达、判为未送达），而假阴性会让调用方据那个未验证读数（现为 `submit-unverified`）**重发** ⇒ **重复投递**，正是规则 2 要防的事。
    - **为何全文搜索不构成假阳性（须论证，别当例外网开一面）**：nonce 是 **per-send 唯一**的，只可能由本次发送写入 ⇒ 全文命中 ⇒ 本次信封确实进了对方 transcript。字节边界原本防的是「把历史里的旧 marker 当本次送达」——**唯一 nonce 已在源头排除该情形**，故边界只是**证据强度的加成**，不是防假阳性的必要条件。（推论：若某 adapter 用**可复用的固定 marker** 而非唯一 nonce，则全文降级对它**不成立**，必须留在边界路。）
    - 仍然：pane 命令成功 / pane 存在 / 转录 size 增长 / mtime 变化**都不是**送达证据（忙碌目标会自行增长转录）；**peer 回复是唯一的语义 ACK**。
-4. **fail-closed**：未验证即 `queued-unverified`，绝不当 `delivered`。「未验证」= **两路都没搜到 nonce**（含降级后的全文搜索），不是「指纹核不上」。
+4. **fail-closed，且结果必须按「已执行的动作」分类 —— 不许用一个 unverified 桶混装**：未搜到 nonce 绝不当 `delivered`（「未验证」= **两路都没搜到 nonce**，含降级后的全文搜索，不是「指纹核不上」）。但**「没验到」不是一个结论，只是一个读数**：下表每一格的正确调用方动作**互相矛盾**（等 turn 边界 / 恢复 composer 里已有的文本 / 去查一条没回话的命令），把它们合成一个值，调用方就无法知道自己在哪一格。**故结果值域按已执行动作展开为七值**（`no-operational-route` 属规则 6，是第八个、语义上「没发出去」那一格）：
+
+   | `delivery` | 已执行到哪一步 | 调用方动作 | `retry_safe` |
+   |---|---|---|---|
+   | `pre-injection-rejected` | submit 态不可读，**零 pane 命令** | 待状态可读后重试 | **true** |
+   | `delivered` | 本次 nonce 出现在 pre-send 边界之后 | 等语义 peer ACK | false |
+   | `queued-for-next-turn` | 活跃 Codex 的 Tab 已执行，nonce 尚未出现 | **等 turn 边界，不得重投** | false |
+   | `submit-unverified` | Enter 已执行，nonce 未观测到 | 查目标或等 ACK，不得盲目重投 | false |
+   | `composer-unsubmitted` | 文本已写入，按键前刷新为 unknown，**未发任何键** | **恢复既有 composer，不得重写信封** | false |
+   | `write-unverified` | 写入命令非零/超时（未回话） | 查目标，不得重投 | false |
+   | `submit-command-unverified` | 提交键命令非零/超时（未回话） | 查目标或等 ACK，不得盲目重投 | false |
+
+   - **每个结构化 pane 结果必须同时输出**：`submit_action`、`recommended_action`、`verification_guidance`、`retry_safe`、本次 nonce、message-specific `evidence`（`envelope-nonce-found` 或 `none`）、`acknowledged=false`（直到 peer 回复）。
+   - **`retry_safe=true` 只允许出现在机械可证「零 pane 命令」的路径上**——即 `pre-injection-rejected` 与 `no-operational-route` 两格。**命令失败不等于零副作用**：一条非零或超时的 pane 命令**可能已经产生副作用**，故 `*-unverified` 一律 false。
+   - **`queued-for-next-turn` 必须附 `verification_guidance=early-transcript-miss-is-not-nondelivery-evidence`**：调用方不得因一次早期 transcript 零命中而重投；等 turn 边界或 peer ACK。
+   - **禁止用预测式命名**（`will-land` / `stranded` 之类）：那是在无证据的情况下预测结果。名字只许说**已经做过什么**。
 5. **pane 存在性 preflight 必须选「对不存在的 pane 会明确报错」的探针，且按 **stdout 与 stderr 合并文本**判定**（诊断文本可能只出现在 stderr——zellij 实测即如此；transport 中立表述；zellij 侧的具体裁定见下「参考 adapter」段）：**禁用**「对不存在的 pane 静默返回空」的读屏类命令作存在性判据（会得**假阳性**：把不存在的 pane 认作存在）；且**不得把退出码当作成功依据**——复用器可能对「pane 不存在」也返回 rc=0（zellij 六格实测里四格如此）。反向也不成立：探针对不存在的 pane 可能返回非零，但**不得**据此把非零当拒绝依据，见下「参考 adapter」段那条未解决矛盾。存在性 preflight 只解决**寻址**，本身**不是**送达证据（规则 3 不变）。
    - **「按合并文本判定、不靠 rc」不只适用于探针，也适用于注入与提交命令本身**：复用器对「目标 session 名不存在」也可能 **rc=0，而说明只出现在 stderr（stdout 里甚至装的是正常内容，如 session 列表）**（实测文本见下「参考 adapter」段的 zellij 裁定）。⇒ 调用方若按 `$?` 判成功，会把「整条命令打进虚空」读成「已发出」。
    - **最坏情形：连 stdout 判定都救不了** —— **session 存在、但 pane 不存在**时，注入命令可能 **rc=0 且 stdout 与 stderr 两条流全空**（zellij 实测，见下）。这一格没有任何事后文本可依据。⇒ **本规则的存在性 preflight 不是优化，而是唯一能在注入前发现该情形的手段**（会报错的探针至少会打印 not found）；一旦注入已经发出，唯一判据只剩规则 3 的**送达证据（nonce）**。
+   - **「fail closed」必须连相位一起写，否则它是歧义的**（「拒绝了」没说清**目标 pane 有没有已经被写入**）：
+     | 相位 | 处置 | 结果值 | 退出码 |
+     |---|---|---|---|
+     | 首次规划即 submit 态 unknown | **零 pane 命令** | `pre-injection-rejected`（`submit_action=none-pre-injection`、`retry_safe=true`）| 非零 |
+     | 文本已写入 pane 后刷新为 unknown | **不发任何提交键** | `composer-unsubmitted` | 非零 |
+     | 首次 Enter 后 submit 态变 active/unknown | **不补第二次 Enter** | `submit-unverified` | — |
+     | 写入/提交命令非零或超时 | 保留 nonce + 失败相位，明确禁止盲目重投 | `write-unverified` / `submit-command-unverified` | 非零 |
    - **本规则只管 pane 存在性，不覆盖「`pane_ref.session` 腐烂」**：复用器 session **改名**后，据启动时环境快照推断出的 `pane_ref.session` 即失效（复用器把 session 名注入子进程环境时是**启动时快照**，改名不回写已运行的进程），且因上一条会**静默成功**——信封喷进虚空。故**换复用器或改名后，所有既有 `pane_ref` 必须整条重建，不能只改 `multiplexer` 字段**。（证据等级：**下游实测，上游未独立复现**。）
 6. **发送侧能力检查（发之前先问「我投得进去吗」）**：发送方必须校验**本次路由实际要用的**那条投递能力**现在还在**——**走 pane 就校验 pane 侧能力（复用器 CLI + 目标 pane 存在，按规则 5），走 resume 才校验 resume 侧 CLI**；不得为了「看起来更严格」去校验本次不用的能力（那只会在无关缺失时误拒）。
    - 校验不过、或**推不出任何可用的 operational 路由** ⇒ 报 **`no-operational-route`** 且**非零退出**。
-   - **`no-operational-route` 与规则 3 的 `queued-unverified` 语义必须分开**：前者是「**没发出去**」（发送侧前提不成立，重试是安全且必要的），后者是「**发了但没验到**」（可能已送达，盲目重发会重复入队，见规则 2）。把二者混成一个状态，调用方就无法判断该不该重发。
+   - **`no-operational-route` 与规则 4 的每一个 `*-unverified` 语义必须分开**：前者是「**没发出去**」（发送侧前提不成立，重试是安全且必要的），后者是「**发了但没验到**」（可能已送达，盲目重发会重复入队，见规则 2）。把二者混成一个状态，调用方就无法判断该不该重发。
+     - **与 `pre-injection-rejected` 也须分开**（两者都「没发出去」且 `retry_safe=true`，但**修法不同**）：`no-operational-route` = **路由本身坏了**（改修路由/重建 `pane_ref`）；`pre-injection-rejected` = 路由没问题，只是**目标 submit 态此刻读不出**（重新读状态即可）。混成一格会把「去修 pane_ref」和「过一会再读」压成同一个建议。退出码也应可区分。
    - **禁止静默回落到 `claude -p --resume`**：pane 路由不可用时悄悄改走 resume，会把「定向注入到活 TUI」换成「往会话文件追加、回复走调用方 stdout、对方界面上看不见」（§3 末 NOTE），且**代价与语义都变了却没人被告知**。要走 resume 必须是**显式选择**（调用方指定或配置声明），不是失败兜底。
    - **对称性论证（这是补对称，不是新原则）**：adapter 对 codex 分支**早已**明确拒绝——活 Codex TUI 而无 `pane_ref` 时直接报错，不去猜一条更差的路；而 claude-code 分支在同样处境下却**静默**回落 `claude -p --resume`。同一处境、两个 brand 两种行为，本规则把 claude-code 拉回与 codex 一致的 fail-closed 形状。
+7. **resume transport 不得握有目标 turn 的生杀权**（本条与「resume 是否显式 opt-in」**正交**：opt-in 只改「谁来选这条路」，不改选中之后谁掌握它的生命周期）：`codex exec resume` / `claude -p --resume` 的进程承载目标**整个 turn**，不是一条有界的「写消息」命令。把它跑在发送方的 timeout 之下，等于**让发送方的耐心成为目标的 deadline**——一次发送侧观察超时会 SIGKILL 一个正常工作的 runner，中断一个可能**已经写过文件、已经调用过外部系统**的 turn。
+   - **必须以独立 process session（detached）启动，并断开发送方 stdin**；`--timeout` 只限制**本次 nonce 观察窗**，观察结束**不得** terminate/kill runner。
+   - **runner 的输出不得接管道**：被放弃的 runner 若管道缓冲写满，会**卡在目标的 turn 里面**——那是同一类 bug 的更安静版本。落到文件（或等价的非阻塞去处）；**也不该直接丢弃**，因为 `-p` 形态下 runner 的 stdout 是目标回复**唯一**出现的地方。未在观察窗内退出时，须把该输出位置**如实报出**。
+   - 结果值域：nonce 命中 = `delivered`（**仍只证明 transport entry**，须同时标 `task_completion=unverified`）；观察窗结束但 runner 仍活 = `resume-started-unverified`；runner 在 nonce 命中前退出 = `resume-exited-unverified`。三者 `retry_safe` 均为 false。
+   - **runner 退出（哪怕 rc=0）不证明零副作用**：turn 可能已读写或调用外部系统，调用方须先查 durable 产物 / peer ACK 再决定是否重跑。
 
 **投递前置校验（统一契约：动手前先验前提，验不过就拒绝，不猜、不静默降级）**：上面规则 5/6 各管一半前提；两半共用**同一形状**，故在此收成**一条**契约，避免各处再写各自的临时门。
 
 | 半边 | 问题 | 硬规则 | 拒绝时 |
 |---|---|---|---|
 | **路径推导** | 「我该往哪写？」 | 由脚本位置反推仓根（`__file__` 上溯 N 级那一族做法）**必须校验推导结果真是项目仓**——目标目录须含 `.trellis/` 或 `.git/`。推不出、或推出来的不是项目仓 ⇒ 拒绝；**绝不 `mkdir` 造一个假注册表**（`mkdir -p` 恰好会把错位置造得「像是本来就有」）。自登记时目标 `.arborist/` 不存在的处置**不在此复述**，见 §5 第 8 点（fail-closed 报 `half-registered`、不得静默上移父目录）。 | 非零退出 + 明确说出「推导出的路径不是项目仓」 |
-| **路由推导** | 「我投得进去吗？」 | 推不出可达路由即 fail-closed（规则 6）；pane 存在性用**会报错**的探针并**解析 stdout+stderr 合并文本**（规则 5），禁用「对不存在 pane 静默返回空 + rc=0」的读屏类命令；**路由与传输必须分层**——preflight 与路由判据定义在「**本次路由所需能力**」这一抽象层上，**不得**把某个具体复用器的名字/命令硬编进路由判定（那样每换一次复用器都要改路由代码，而契约本该只换 adapter）。 | `no-operational-route` + 非零退出（**≠** `queued-unverified`）|
+| **路由推导** | 「我投得进去吗？」 | 推不出可达路由即 fail-closed（规则 6）；pane 存在性用**会报错**的探针并**解析 stdout+stderr 合并文本**（规则 5），禁用「对不存在 pane 静默返回空 + rc=0」的读屏类命令；**路由与传输必须分层**——preflight 与路由判据定义在「**本次路由所需能力**」这一抽象层上，**不得**把某个具体复用器的名字/命令硬编进路由判定（那样每换一次复用器都要改路由代码，而契约本该只换 adapter）。 | `no-operational-route` + 非零退出（**≠** 规则 4 的任何 `*-unverified`）|
 
 - **两半均已在随发 adapter 落地**（2026-07-30；此前为「规范已落、实现未收敛」）：`scripts/agenttui.py` ①推导出的仓根须含 `.trellis/` 或 `.git/`，否则非零退出拒绝（且**不创建**任何目录），可用 `--repo` 显式指定；②路由改为**能力层**判定——`build_route` 只问「这个 `pane_ref` 有无已注册 transport / 该 transport 可用吗 / 目标 pane 存在吗」，具体复用器命令收在 `PaneTransport` 子类里，复用器名→transport 的映射只在一处注册表；③有发送侧能力检查与 `no-operational-route`（非零退出）。**仍有未实现项**（规则 3 的双指纹/证据等级），逐条见下「随发 adapter 的契约缺口」。
 
 - **参考 adapter（随发 · opt-in · 二选一别混）**：
   - `scripts/agenttui.py`（adopt 铺到 `<repo>/.trellis/scripts/`）是本契约的 **operational 参考实现**——按注册表 `pane_ref` 经 **transport 抽象**寻址注入（随发只注册了 zellij 一个 transport，其 `write-chars --pane-id` 细节在该 transport 内部）；调用见工具表条目 `agenttui-direct`（`python3 .trellis/scripts/agenttui.py {status|send|heartbeat|stop}`，发前可 `--dry-run` 验路由——dry-run **不跑**存在性探针，因为探针会抢焦点）。**operational 投递一律走它**（而非下面那个演示脚本）。
-    - **调用方须知的两处行为**（按规则 6 落地，非默认兜底）：①目标无可达 pane 时**不再**自动改走 `claude -p --resume`——要走 resume 必须显式加 `--allow-resume`，否则报 `no-operational-route` 并**非零退出**；②`no-operational-route` 的结构化输出带 `reason` / `detail` / `remedy` / `sent=false` / `retry_safe=true`，与 `queued-unverified`（`sent=true` / `retry_safe=false`）**字面区分**——照它判断该不该重发。
+    - **调用方须知的三处行为**（按规则 6 落地，非默认兜底）：①目标无可达 pane 时**不再**自动改走 `claude -p --resume`——要走 resume 必须显式加 `--allow-resume`，否则报 `no-operational-route` 并**非零退出**；②`no-operational-route` 的结构化输出带 `reason` / `detail` / `remedy` / `sent=false` / `retry_safe=true`，与规则 4 的各 `*-unverified`（`sent=true` / `retry_safe=false`）**字面区分**——照它判断该不该重发；③**pane 结果值域是规则 4 的七值**（不再有单一的 `queued-unverified`），每条结果带 `submit_action` / `recommended_action` / `verification_guidance`；退出码：`delivered` 与 `queued-for-next-turn` = 0（后者是契约预期状态，不是错误），`composer-unsubmitted` / `write-unverified` / `submit-command-unverified` = 2，`pre-injection-rejected` = 4，`no-operational-route` = 3。**`submit-unverified` 退出 0**（与旧 `queued-unverified` 一致，避免改变既有调用方的成败判断）——它的「不确定」信息在 JSON 里，别拿退出码当送达证据。
     - **⚠️ 它仍未满足契约全部条款**——剩余缺口逐条列在下方「随发 adapter 的契约缺口」，别读成「已满足全部契约」。
   - **`--pane-id` 寻址不免除聚焦（已据实更正）**：本段早前写作「**定向注入**（不靠焦点）」，**那是错的**。**实测**（一个 adopter 实例的 dogfood 巡检；上游 gardener 未独立复现）：`zellij action write-chars --pane-id <目标 pane>` **跨 tab 不生效**，跨 tab 投递必须先 `zellij action focus-pane-id <目标 pane>` 把焦点移过去。
     - **后果 = 一条已知架构局限**：投递因此会**抢焦点**，与「人类正在同一 zellij session 里操作（切 tab / 移焦点）」**结构性冲突**——人类的一次切 tab 就能让并发投递投错或被打断。本 guide **只记录该局限**，不承诺任何具体替代方案；终端复用器的选择**正在评估**（core 仍 transport 中立，见 [ADR-0007](./decisions/0007-agenttui-delivery-contract-pluggable-adapter.md) Amendment）。
@@ -278,26 +312,34 @@
     > **证据标签授予纪律（本节自身就是反例）**：上面被更正的那条，此前挂的是本仓最强的证据标签「**已独立复现**」——而它错了两处。⇒ **授予「已独立复现」必须附原始读数（命令 + rc + stdout 原文 + stderr 原文）；只有结论没有读数的，只能标「已声称复现」。** 理由不是形式主义：同版本、同命令，两个报告都能给出不同的 rc（见上方矛盾），**只标版本救不了，只有原始读数能交叉核验**。证据分级只在标签授予纪律可信时才有意义。
     - 关联：`pane_ref.session` 会因 zellij session **改名**而腐烂——`ZELLIJ_SESSION_NAME` 是**启动时快照**、不回写已运行的进程，故据它推断的 `pane_ref.session` 改名后失效，并落进第一格**静默成功**（证据等级：**下游实测，上游未独立复现**）。规则 5 只管 pane 存在性、**不覆盖这一类**；改名或换复用器后 `pane_ref` 必须整条重建。
   - `scripts/agenttui_deliver_zellij.py` 是**契约的 seam 化演示，非 operational**：默认注入器**收 `pane_ref` 却不定向、只写当前焦点 pane**，跨 session / 跨 brand（目标 pane ≠ 焦点 pane）必投错——**未补 `--pane-id` 前不得当跨 pane operational 路**（下游把它误当正道，正是跨 brand 发信「表现不佳 / 不稳定」的根因）。
-- **⚠️ 随发 adapter 的契约缺口（截至 2026-07-30，必须可见——契约不得被读成「代码已做到」）**：随发 `scripts/agenttui.py` **尚未**实现下列契约条款，port 任务另行追踪；在它补齐前，调用方须自行承担对应风险：
-  - **规则 3 的 inode+size 双指纹与全文降级**：**仍未实现**——只记 size 作起始偏移，且当**现 size 小于该偏移**（= 文件被重写/截短）时**直接判未命中** ⇒ 目标做过 compact / 会话文件被重写时返回**假阴性** `queued-unverified`（重发风险，见规则 2）。
+- **⚠️ 随发 adapter 的契约缺口（截至 2026-08-05，必须可见——契约不得被读成「代码已做到」）**：随发 `scripts/agenttui.py` **尚未**实现下列契约条款，port 任务另行追踪；在它补齐前，调用方须自行承担对应风险：
+  - **规则 3 的 inode+size 双指纹与全文降级**：**仍未实现**——只记 size 作起始偏移，且当**现 size 小于该偏移**（= 文件被重写/截短）时**直接判未命中** ⇒ 目标做过 compact / 会话文件被重写时返回**假阴性**（现在这个假阴性落在 `submit-unverified` 那一格；重发风险，见规则 2）。
   - **规则 3 的证据等级标注**：**仍未实现**——命中只记单一 `envelope-nonce-found`，不区分 `…-after-boundary` / `…-fullfile`，调用方读不出证据强度。
+  - **五种形态的读屏分类器（含 `unclassified` 一格与其原始签名归档）**：**仍未实现**——adapter 目前**不做任何读屏分类**，也不写 `unclassified` 档案。它能区分的只是**已执行的动作**（规则 4 的七值：文本有没有写、键有没有按、命令有没有回话、nonce 有没有出现），**不能**区分「文本到了 composer 但被截断」（形态 3）与「目标要求重新登录」（形态 2）——这两格在规则 4 的值域里都表现为 `submit-unverified`。⇒ 下表的形态**只是诊断词汇表，不是 adapter 的输出值域**；形态 2 的模式常量（`provenance: single-observation`）在代码里**尚不存在**。
+  - **形态 3 的对因修法只覆盖「写入方式」这一半**：bracketed-paste 成帧已实现（见下方 ✅），但它**只**针对「高速按键流被当成 paste burst、Enter 被吞成换行」这一机制；**不声称**覆盖形态 1（沙箱）与形态 2（认证），也不声称覆盖长文本在 composer 侧的其它损坏形式。
+  - **paste 成帧只对 codex 开**：claude-code 未开，因为**没有实测**支持在那里成帧（同名 ≠ 同能力）。这是**证据缺口，不是契约缺口**——规则 1 要求的是「按 brand 白名单」，而白名单当前只有一格。
   规范先于实现落定是**刻意**的（契约是判据、实现向它收敛）；但**凡未实现处必须像这样逐条标注**，不得笼统写成「参考 adapter 已满足上述契约」。
 - **✅ 已收敛的条目（2026-07-30 实现，本清单据实改写；留档以便对照上面那两条仍缺的）**——同时列出**实现带来的已知代价**，别读成「无副作用」：
   - **规则 5 的存在性 preflight（解析合并文本）**：已实现——注入前用 `focus-pane-id` 探针并**按 stdout+stderr 合并文本**判 `Pane with id … not found` / `Session '…' not found`，**不把退出码当成功或拒绝依据**（原因见上方未解决矛盾）；探针失败即 `no-operational-route`、**零注入命令**。**禁用** `dump-screen -p`（对不存在 pane 静默返回空 + rc=0）作判据。
   - **`--pane-id` 前置 `focus-pane-id` 聚焦**：已实现，且**与上一条是同一个命令**——存在性探针本身就是聚焦命令，故跨 tab 投递前焦点必然已移到目标 pane。**代价照旧**：投递**抢焦点**，与人类同 session 操作结构性冲突（上文「已知架构局限」，未消除）；`--dry-run` 因此**不跑**探针（也就不做该次校验），输出里如实标注。
-  - **规则 5 的「注入/提交命令也按 stdout 判定」**：已实现——注入与提交命令都按 stdout/stderr 文本判失败，退出码不作成功证据。**但最坏那格无解**：session 在、pane 不在时注入是 rc=0 + 两条流全空 ⇒ 代码**不得**据此判成功，判据只剩规则 3 的 nonce（提交命令被文本判失败时，因字节已发出，报 `queued-unverified` 而非 `no-operational-route`）。
+  - **规则 5 的「注入/提交命令也按 stdout 判定」**：已实现——注入与提交命令都按 stdout/stderr 文本判失败，退出码不作成功证据。**但最坏那格无解**：session 在、pane 不在时注入是 rc=0 + 两条流全空 ⇒ 代码**不得**据此判成功，判据只剩规则 3 的 nonce（提交命令被文本判失败时，因字节已发出，报 `submit-command-unverified` 而非 `no-operational-route`）。
   - **规则 6 的发送侧能力检查 + `no-operational-route`**：已实现——只校验**本次路由用得到**的能力（走 pane 校验 transport 可用 + pane 存在；走 resume 才 `which` 对应 resume CLI），无可用 operational 路由 ⇒ `no-operational-route` + 非零退出；claude-code 分支**不再静默回落** resume（与 codex 分支同形拒绝），resume 须 `--allow-resume` 显式选择。
   - **「投递前置校验」两半**：已实现——路径推导侧见上（仓根须含 `.trellis/` 或 `.git/`，拒绝时不创建任何目录）；路由推导侧改为能力层判定，具体复用器命令封在 transport 子类内、映射集中在一处注册表，故换复用器只加 transport、契约与路由代码不动。
+  - **规则 1 的「可达态 / submit 态分离」+ 规则 4 的七值结果模型**（2026-08-05 上游自一个下游采纳仓 port）：已实现——Codex 的提交键改由**目标 transcript 的最新 turn-boundary 事件**决定（不再用新鲜度），settle 后按键前**再刷新一次**，未终止的 JSONL 尾记录按 unknown 处理；结果按已执行动作分七值并带 `submit_action` / `recommended_action` / `verification_guidance` / `retry_safe`。**`retry_safe=true` 仅两格**（`pre-injection-rejected`、`no-operational-route`），且有机械测试钉住这一点。**代价 / 边界**：①`pre-injection-rejected` 时**连 `--dry-run` 也拒绝**（不肯展示一个猜出来的键）；②转录里没有 `task_started`/`task_complete` 的 Codex 目标（例如极早期或异常 rollout）现在**投不出去**而不是猜 Enter——这是刻意的 fail-closed，但确实**收紧**了此前会「蒙一个键」的路径。
+  - **规则 1 的 bracketed-paste 成帧（形态 3 的写入方式修法）**：已实现——**仅 codex**；契约层只表达「本次写入需成帧」这一能力意图，`ESC[200~`/`ESC[201~` 只出现在 transport 子类里（机械测试钉住路由层不含该机制）。**它不改路由、不改复用器选择、不改命令条数**——同一条写入命令，只是 payload 被包住。
+  - **规则 7 的 resume 生命周期 detach**：已实现——runner 以独立 process session 启动、stdin 接 `DEVNULL`、输出落私有文件（**不接管道**，以免被放弃的 runner 写满缓冲卡在目标 turn 里），`--timeout` 只限制 nonce 观察窗，**代码里没有任何 kill/terminate/送信号路径**（机械测试钉住）；结果为 `delivered` / `resume-started-unverified` / `resume-exited-unverified`，附 `runner_pid` / `runner_state` / `runner_returncode` / `task_completion=unverified`。**代价**：runner 未在观察窗内退出时，它的输出不会出现在本次 stdout 上，只以 `runner_output_path` 报出位置（**该文件不会被本进程清理**——runner 还在写）。
 - **五种「注册表看不出来的投不进 / 投不对」（全部已实测 · 一致性 validator 也查不出 · 别指望注册表告诉你 · 覆盖度的如实表述见本条末，勿写成「病因已覆盖」）**：注册表一致性（§2.2.1 / §4）能排除**归属错**与**寻址错**，但下面这些形态在注册表里**一模一样**——`state=active`、`pane_ref` 有效、`session_file` mtime 新鲜、一致性检查全绿——投递却到不了目的地，或**到了但不是你想说的话**：
 
-  **读表前必读 —— 分类的输入是「可观察签名」，不是底层病因。** 任何分类器（人或代码）**看不见**目标的鉴权状态、看不见沙箱边界、看不见 composer 内部；它只看见三类签名：**屏幕形态**（读屏文本）、**写入/提交命令的 stdout**、**transcript 里有无越界 nonce**。下表末二列正是照这条区分开的：能不能造出**签名**（可以，五格都能）与「该签名是否**只可能**由这一格的病因产生」（多数**未证明**）是两件事。
+  **读表前必读（一）—— 「读数」列写的是规则 4 展开前的粗读数，且它到七值的映射不是一对一。** 规则 4 现在把 pane 结果按**已执行动作**分成七值，但那**不是**病因分类：形态 2（认证失效）与形态 3（截断未提交）都落在 `submit-unverified` 那一格里，**adapter 分不开它们**（要分开必须读屏，而读屏分类器**尚未实现**，见上方缺口清单）。⇒ 拿到 `submit-unverified` 不等于知道自己在哪一格；本表的形态是**诊断词汇表**，规则 4 的七值是**adapter 的输出值域**，两者不可互相代入。
+
+  **读表前必读（二）—— 分类的输入是「可观察签名」，不是底层病因。** 任何分类器（人或代码）**看不见**目标的鉴权状态、看不见沙箱边界、看不见 composer 内部；它只看见三类签名：**屏幕形态**（读屏文本）、**写入/提交命令的 stdout**、**transcript 里有无越界 nonce**。下表末二列正是照这条区分开的：能不能造出**签名**（可以，五格都能）与「该签名是否**只可能**由这一格的病因产生」（多数**未证明**）是两件事。
 
   | # | 形态 | 失败发生在哪一侧 | 读数 | 唯一可用判据 | 换终端复用器能否解决**本格的送达失败** | 签名 fixture 可复现？ | 签名→病因 映射独占性 |
   |---|---|---|---|---|---|---|---|
   | 1 | **沙箱半聋**（能被投、自己**发不出**；默认沙箱隔离复用器 unix socket）| **发送侧**（本机环境）| `no-operational-route` 或注入无声无效 | 发送侧能力检查（规则 6）；出向单测 | **不能**——tmux 同样靠 unix socket，须靠 bypass 启动约定 | ✅ 不带 bypass 起一个会话；或单测经 seam 注入「复用器不可用」 | **假定** |
-  | 2 | **认证失效**（字节收到、提交键也生效，目标 CLI 无法处理：屏幕上是 token 刷新失败 / 要求重新登录；**transcript 永无痕迹**）| **接收侧**（目标 CLI 层，消息从未进会话）| `queued-unverified` | **读屏**（见下 `dump-screen`）——transcript 上永远看不到 | **不能**——与传输无关 | ✅ 往测试 pane 注入**伪造的**该错误文本。**注意它测的是「认不认得这个屏幕形态」，不是鉴权本身** | **假定** |
-  | 3 | **长文本损坏 + 未提交**（文本到了 composer 但被**截断/丢字符**，且**未入队**）| **传输侧 → 接收侧 composer** | `queued-unverified` | **读屏**（唯一能看到「被截断」的手段）| **不能**——对因修法在写入方式（bracketed-paste 一次性写入）与投递形态（短指针，见下），不在复用器选择上 | ✅ 写入文本**而不发提交键** | **假定** |
-  | 4 | **delivered-but-verified-too-early**（其实**成功了**：nonce 确实在目标 transcript 里，只是 verify 窗口跑在目标 CLI 落盘之前）| **验证侧**（既非传输也非接收故障）| `queued-unverified`（**假阴性**）| 事后重搜 nonce（放宽窗口后即命中）| **不能**——是时序问题 | ✅ 把验证窗口调小；或让 fake transcript 在窗口**后期**才写入 nonce | **假定** |
+  | 2 | **认证失效**（字节收到、提交键也生效，目标 CLI 无法处理：屏幕上是 token 刷新失败 / 要求重新登录；**transcript 永无痕迹**）| **接收侧**（目标 CLI 层，消息从未进会话）| `submit-unverified`（旧：`queued-unverified`）| **读屏**（见下 `dump-screen`）——transcript 上永远看不到 | **不能**——与传输无关 | ✅ 往测试 pane 注入**伪造的**该错误文本。**注意它测的是「认不认得这个屏幕形态」，不是鉴权本身** | **假定** |
+  | 3 | **长文本损坏 + 未提交**（文本到了 composer 但被**截断/丢字符**，且**未入队**）| **传输侧 → 接收侧 composer** | `submit-unverified`（旧：`queued-unverified`；写入后未按键那一支是 `composer-unsubmitted`）| **读屏**（唯一能看到「被截断」的手段）| **不能**——对因修法在写入方式（bracketed-paste 一次性写入）与投递形态（短指针，见下），不在复用器选择上 | ✅ 写入文本**而不发提交键** | **假定** |
+  | 4 | **delivered-but-verified-too-early**（其实**成功了**：nonce 确实在目标 transcript 里，只是 verify 窗口跑在目标 CLI 落盘之前）| **验证侧**（既非传输也非接收故障）| `submit-unverified`（**假阴性**；旧：`queued-unverified`）| 事后重搜 nonce（放宽窗口后即命中）| **不能**——是时序问题 | ✅ 把验证窗口调小；或让 fake transcript 在窗口**后期**才写入 nonce | **假定** |
   | 5 | **构造侧内容损坏**（信封在**离开发送方之前**就已缺字）| **构造侧**（发送方自己）| **完全的绿**：投递成功、nonce 越界命中、所有门全绿 | 发送前对信封**自校验**（回读比对）或结构性禁用会触发替换的引用形式；**投递侧任何探测都测不到** | **不能**——与传输选择完全无关 | ✅ 平凡（构造一条会被替换吞字的信封） | **已证明**——回读比对**直接**判定「正文与源不一致」，不依赖排除法 |
   | — | **`unclassified`（必须保留的一格）** | 未知 | 任意 | **签名不匹配任何已知形态** ⇒ 落这一格 | 不适用 | 不适用（它就是「都不匹配」）| 不适用 |
 
@@ -318,9 +360,10 @@
   - **形态 2 的触发模式常量单独标 provenance（`provenance: single-observation`）**：用来识别该屏幕形态的那段文本模式（屏上的重新登录 / token 刷新失败提示）**只来自单次观察**——不是穷举过该 CLI 各版本各语言各种失败提示的结果。⇒ 它的**证据等级低于该形态本身**（形态确实发生过；模式常量只见过一次长什么样），二者必须分开记，否则会把「见过一次的字符串」当成稳定契约。
     - **匹配失败时的行为（fail-closed，硬规则）**：屏幕内容**不匹配**该模式时，**必须降级为 `unclassified`**，**不得归入最近的一格**。理由与上条同：模式常量既然只有单次观察，那么「不匹配」的最可能原因是**模式不全**，而不是「病因不是这个」；此时按相似度就近归类会**凭一个未验证的常量**给出一个确定的错误结论。
     - 推论：这段模式常量属**实现**（投递 adapter 的分类器），随观察增加而更新；每次扩充都应记下新观察的出处，别让它悄悄从 `single-observation` 变成看不出出处的「魔法字符串」。
-  - **形态 1–3 同一读数、修法完全不同**：规则 3 的 nonce 判据对它们给出**同一个** `queued-unverified`（形态 2 的字节从未进 transcript、形态 3 的信封不完整或未提交，都搜不到 nonce）。⇒ `queued-unverified` **不是**可直接据以重发的诊断结论，它只是「没验到」；重发对形态 1/2 无效（发送端或认证坏了，重发多少次都一样），对形态 3 也未必有效。别把它当成「网络抖了一下、再发一次就好」。
+  - **形态 1–3 同一读数、修法完全不同**：规则 3 的 nonce 判据对它们给出**同一个**「没验到」读数（形态 2 的字节从未进 transcript、形态 3 的信封不完整或未提交，都搜不到 nonce）——规则 4 把结果按动作展开后，形态 2/3/4 仍**共享** `submit-unverified` 这一格。⇒ `submit-unverified` **不是**可直接据以重发的诊断结论，它只是「没验到」；重发对形态 1/2 无效（发送端或认证坏了，重发多少次都一样），对形态 3 也未必有效。别把它当成「网络抖了一下、再发一次就好」。
+    - **规则 4 消掉的是另一类混装**：它把「**做过什么动作**」分开了（有没有按键、命令有没有回话、是不是入队等 turn），**没有**分开「**为什么没验到**」。前者可从命令与相位机械判定，后者需要读屏。⇒ 别把七值读成「病因已分类」。
   - **形态 4 的详情与后果（已实测：一次真实同仓投递，目标 brand=`claude-code`）**：目标 transcript 里 nonce **确实存在**（`type=user` 的一条记录），但当次 verify 窗口是 `PANE_VERIFY_ATTEMPTS=10 × PANE_VERIFY_INTERVAL_SECONDS=0.1` ⇒ **总窗口仅 1 秒**，grep 在目标 CLI 落盘**之前**就跑完了，于是返回 `queued-unverified`。
-    - **它会污染前三种病因的样本集**：任何「投递失败率」统计都被它**抬高**，而它**根本不是失败**。⇒ 统计投递可靠性前必须先把这一格排除（对每个 `queued-unverified` 事后重搜一次 nonce），否则会给一个不存在的问题分配工时，并把真正的形态 1/2/3 稀释掉。
+    - **它会污染前三种病因的样本集**：任何「投递失败率」统计都被它**抬高**，而它**根本不是失败**。⇒ 统计投递可靠性前必须先把这一格排除（对每个未验证读数——现为 `submit-unverified`——事后重搜一次 nonce），否则会给一个不存在的问题分配工时，并把真正的形态 1/2/3 稀释掉。
     - **这类假阴性最危险的地方不是抬高统计，而是它自带一个听起来合理的现成解释，于是没有人会去查。** 同一批实测里，另一个目标的 `queued-unverified` / `evidence=none` 当时被解释为「目标正在 turn 中、消息躺在接收队列里」——而目标**其实收到了并照办了**。按 1 秒窗的发现，那极可能就是同一个假阴性，而那句「已入队」的解释是**事后编的、且不可证伪**。**一个无法被解释的错误读数会被追查；一个能被解释的错误读数会被归档。**
       - ⇒ **规范要求**：凡读数为「未验证」，处置必须给出**可证伪**的判据——读屏分类（形态 2/3）、越界 nonce 重搜（形态 4）、或目标的**实际行为**（它照办了吗）。**不接受「大概是在排队 / 目标忙」这类不可证伪的叙述**作为结论；它不是诊断，是把一个待查读数关掉。
     - **标定数据（三次独立实例，同一形态）**：三次投递均返回 `queued-unverified` / `evidence=none` 而实际已送达；其中一次精测到真实落盘延迟 **< 5 秒**（5s 时重搜 nonce 已命中，15s/30s 不变）。⇒ 窗口取 **15–30 秒**，并保持**命中即早退**。
