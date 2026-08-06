@@ -5,6 +5,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
 
 ## [Unreleased]
 
+### Added
+- **Receiver-side submit-ack handshake: a causal delivery reading next to the existing bystander one**
+  (`overlay/scripts/agenttui_submit_ack.py`, `overlay/hook-templates/submit-ack/`,
+  `agenttui-registry.md` §3 rule 8, one `[local]` injection entry, +28 tests) — the only delivery
+  evidence so far was the sender walking the target's transcript for the per-send nonce. That reading is
+  *bystander*: it lags the target CLI's own flush (a 1-second verification window read an already
+  delivered envelope as unverified and provoked a duplicate submit), and it cannot separate "the text is
+  piled up in the composer and was never submitted" from "submitted but not yet flushed" — the first of
+  which is the pain actually reported. The receiving CLI's submit hook fires *only* on a real submit, so
+  an ack is causal proof of submission. Acks are appended one JSON object per line to a global
+  `~/.arborist/submit-acks.jsonl` (append-only because several ATUIs write concurrently and a
+  read-modify-write loses records; same naming and permission handling as the focus-intrusion event log —
+  0600 on creation, an existing mode left exactly as found). A record carries only what the hook can
+  itself prove — nonce, timestamp, receiver brand/agent/project/session, the matched envelope header
+  fields — and structurally never the message body. Two hard properties, both mechanically pinned: the
+  recorder **always exits 0** (a non-zero submit hook blocks a real person's prompt) and **always writes
+  an empty stdout** (some brands inject hook stdout as context), so every failure degrades to a stderr
+  warning. Wiring is manual and comes in two forms, with a sibling hook command preferred over pasting
+  into the shipped hook script precisely because it makes "does not change the existing hook's behaviour"
+  structural rather than test-dependent; the paste-in form is nevertheless covered by a differential test
+  that runs a hook fixture with and without the snippet and requires byte-identical stdout and exit code.
+  The fail-safe direction is the load-bearing part: **a missing ack means unconfirmed, never "not
+  submitted"** — the hook may be uninstalled, silently skipped at init time when the host settings file is
+  tracked by the product repo, or its write may have failed, and asserting non-submission from an absent
+  record would trigger a capability-ladder downgrade and re-deliver a message the target already has. An
+  ack may therefore only *prevent* a downgrade, never cause one. Not implemented, and stated as a gap in
+  the guide: `agenttui.py` does not consult the table yet, so no delivery result carries an ack field and
+  the seven-value upgrades are, for now, a human reading rather than a mechanical one.
+
 ### Changed
 - **Pane reachability and current Codex turn activity are now two separate readings**
   (`agenttui.py` `derive_codex_submit_activity` / `build_pane_route`, `agenttui-registry.md` §3 rule 1,

@@ -57,10 +57,11 @@ Lane 在 task `prd.md` 顶部声明 `Lane: fast|full`（full 若：动依赖 / �
 ### 本地覆盖入口 [local]（每轮 session 需知；正文见定制层 / 对应 guide）
 - [local] 跨 ATUI 硬边界（别抢活）：别人 lane 的通报=FYI，默认「知道了」，不接手、也别包装成问题上传；只 `handoff` 信 / human 指派才转移归属。判据/范例见 `guides/roles-and-tiering.md`「ATUI 归属边界」。
 - [local] 知识收尾门：交付后（Phase 3.4 commit 后、`/finish-work` 前）按 lane 分级判跑「改动面外全仓知识一致性」扫描，**收尾方自跑**（full lane 即 L2 Impler），不回弹 rootorc。分级/矩阵见 `guides/knowledge-closeout.md`。
+- [local] 直投 ack 判读（**收到或发出跨 ATUI 直投时必须知道**）：`submit-ack` 是**因果**判据（接收侧提交钩子写的，只在真提交时触发），transcript nonce 是**旁观**判据，两者并存 —— **ack 有而 transcript 无 ⇒ 已提交尚未落盘，不得重发**；**ack 缺失只读作「未确认」，绝不读作「未提交」**（钩子可能未装、被 init 静默跳过、或写入失败），据此降级/换手段就会重复投递。判读表与接线见 `guides/agenttui-registry.md` §3 规则 8。
 - [local] AgentTUI 自登记（**本 session 开局第一件事**）：本会话若尚未在 `<repo>/.arborist/agents/<name>/` 登记，按 `guides/agenttui-registry.md` §5 自登记 —— 写 `spec.json`（`brand` = **本会话真实 runtime brand**，不按模板/期望路由/模型名猜）+ `runtime.json`（`state: active`、`session_id`/`session_file`、可达则填 `pane_ref`），并同步全局 `~/.arborist/index.json` 摘要。**不登记的后果不是「少个条目」而是「别人找不到你、也投不到你」**；且目标 `.arborist/` 不存在时必须 fail-closed 报 `half-registered`，不得静默上移父目录（§5「写入路径 fail-closed 门」）。
 ```
 
-> 前两条正文分别在本层「角色/任务分层」「知识收尾门」小节；此处只放**注入范围内的一行入口**，使其真能到达每个 session。
+> 前两条正文分别在本层「角色/任务分层」「知识收尾门」小节，第三条（直投 ack 判读）正文在 `guides/agenttui-registry.md` §3 规则 8；此处只放**注入范围内的一行入口**，使其真能到达每个 session。
 > 需给每个 session 加载的新本地规则，都照此再补一行 `- [local]`。
 
 > **为什么自登记这条必须在 `[local]` 块里**（这条入口的由来，值得照抄这个判据）：`agenttui-registry.md` §5 一直写着**怎么**自登记，本层「角色/任务分层」小节也一直写着「session 启动按其 §5 自登记」——但那句在**注入范围之外**的大段落里，新 session **永远读不到它**。实测后果：按 ADOPT.md 全套做对的仓，新起的 ATUI 依然不知道自己该注册；能注册的会话是因为**有人当场口头说了**，不是因为有机制。
@@ -80,7 +81,7 @@ REPO = Path(".")  # 你的仓根
 spec = importlib.util.spec_from_file_location("sshook", REPO/".claude/hooks/session-start.py")
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 overview = m._build_workflow_overview(REPO/".trellis/workflow.md")
-must = ["跨 ATUI", "知识收尾"]        # 换成你要保证到达 session 的关键字
+must = ["跨 ATUI", "知识收尾", "直投 ack"]   # 换成你要保证到达 session 的关键字
 missing = [k for k in must if k not in overview]
 print("overview chars:", len(overview))
 for k in must:

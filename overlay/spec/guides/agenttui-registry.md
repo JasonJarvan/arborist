@@ -233,6 +233,54 @@
    - **runner 的输出不得接管道**：被放弃的 runner 若管道缓冲写满，会**卡在目标的 turn 里面**——那是同一类 bug 的更安静版本。落到文件（或等价的非阻塞去处）；**也不该直接丢弃**，因为 `-p` 形态下 runner 的 stdout 是目标回复**唯一**出现的地方。未在观察窗内退出时，须把该输出位置**如实报出**。
    - 结果值域：nonce 命中 = `delivered`（**仍只证明 transport entry**，须同时标 `task_completion=unverified`）；观察窗结束但 runner 仍活 = `resume-started-unverified`；runner 在 nonce 命中前退出 = `resume-exited-unverified`。三者 `retry_safe` 均为 false。
    - **runner 退出（哪怕 rc=0）不证明零副作用**：turn 可能已读写或调用外部系统，调用方须先查 durable 产物 / peer ACK 再决定是否重跑。
+8. **接收侧 submit-ack 握手（因果判据 · 降级的前置条件）**：规则 3 的 nonce 判据是**旁观**——发送方去翻对方 transcript。它有两个已实测的局限：①它落后于目标 CLI 自己的落盘（形态 4：1 秒窗口把已送达读成未验证，并**触发了一次重复提交**）；②它**分不出**「文字堆在 composer 从未提交」与「已提交但未落盘」，而前者是 human 报告的当前最大痛点。⇒ 契约新增一条**接收侧**判据：目标 CLI 的「用户提交了一条 prompt」钩子，**只在真的提交时触发**，故它是**因果**判据。
+   - **两者并存、不互斥，各证明不同的一件事**（把它们合成一个「送达」布尔值会丢掉正是要用的那个区分）：
+
+     | 判据 | 性质 | 证明什么 | 不证明什么 |
+     |---|---|---|---|
+     | **submit-ack**（接收侧钩子写的记录） | **因果** | 这个 nonce **被提交了**（钩子只在真提交时触发） | 不证明它已进转录、已被处理、已被理解 |
+     | **transcript nonce**（规则 3） | **旁观** | 这个信封**进了目标的会话记录** | 不证明它是**被提交**的（重写/compact 后的全文命中亦算，见规则 3） |
+
+   - **两者不一致时怎么读（规范性）**：
+
+     | ack | transcript nonce | 读作 | 调用方动作 |
+     |---|---|---|---|
+     | 有 | 有 | 已提交且已落盘 | 等语义 peer ACK |
+     | **有** | **无** | **已提交、尚未落盘**（正是形态 4 那一格，现在有正面证据了） | **不得重发、不得降级**；等落盘或等 peer ACK |
+     | 无 | 有 | 进了转录但本仓没有 ack（多半是接收侧钩子未装，见下） | 按 `delivered` 读；**别据「无 ack」反推有问题** |
+     | 无 | 无 | **未确认**（**不是**未提交） | 见下条：不得据此断言未提交 |
+
+   - **⚠️ ack 缺失 ≠ 未提交 —— 本条是本节最重要的 fail-safe 方向，方向选在这一侧是有理由的，不是保守习惯。** ack 可能因为与「目标有没有提交」**完全无关**的原因而缺失：接收侧钩子从未安装；`settings.json` 被产品仓 git 跟踪导致 `trellis init -y` **静默跳过**整个 hook 安装（`ADOPT.md` 已记这个坑，且 init **不报错**）；接收仓未铺 ack 模块；ack 写入本身失败（磁盘/权限）。⇒ **ack 缺失只能降级为「未确认」（`unconfirmed`），不得断言「未提交」。**
+     - **为什么方向必须是这一侧**：两个方向的错误代价**不对称**。误报「未确认」的代价是**多等一会、少一次降级**（有界，且没有第三方承担）；误报「未提交」的代价是**触发能力阶梯降级 ⇒ 换一条手段再投一遍 ⇒ 目标收到两份同样的指令**——那正是规则 2 与阶梯纪律 1 要防的事，且它是**静默**的（没有任何一方会收到信号）。按「一个能被看见的失败恒优于一个看不见的成功」，方向只能选在「未确认」这一侧。
+     - **推论（写给阶梯实现者）**：ack **只能用来阻止降级，不能用来触发降级**。「本级已确认失败」这个降级前置条件，**不能**由「没读到 ack」满足。
+   - **对规则 4 七值结果模型的影响（ack 只做单向修正）**：
+     - **可因 ack 而升级**：`submit-unverified` / `queued-for-next-turn` / `submit-command-unverified` / `write-unverified` —— 有 ack ⇒ 该信封**确实被提交了**，这几格的「没验到」被正面证据推翻，处置一律变为「等落盘 / 等 peer ACK」，**禁止重发**。
+     - **可因 ack 而被证伪的一格**：`composer-unsubmitted` 的语义是「文本已写入、**未发任何键**」。它与「被提交」在逻辑上互斥 ⇒ 若该 nonce 竟有 ack，说明**发送侧的相位判断错了**（例如人手动按了提交键）。这一格出现 ack 属**矛盾**，应如实报出并按「已提交」处置（**不得**按 `composer-unsubmitted` 的建议去「恢复既有 composer」——那会得到重复文本）。
+     - **`composer-unsubmitted` 与 `submit-unverified` 的区分从此有了正面证据**：此前两者都只是「没验到」的不同相位描述（发送侧自述做过什么），无任何接收侧证据；现在 `submit-unverified` + 有 ack ⇒ 确已提交，`submit-unverified` + 无 ack ⇒ 仍是**未确认**（**不是** `composer-unsubmitted`）。
+     - **不得因 ack 而降级任何一格，也不得新增 `not-submitted` 之类的值**（值域里没有它，正是上一条 fail-safe 的机械落点）。
+   - **ack 表的形状（规范性）**：全局单份、**append-only、一行一条 JSON**（多个 ATUI 并发写，read-modify-write 会丢记录）；位置 `~/.arborist/submit-acks.jsonl`，与 `focus-intrusion.jsonl` 同一命名与权限风格（**新建时** 0600；**既有 mode 保留不动**——收紧别人的运行时文件权限是独立授权范围，不是写入的副作用）。**不得含消息正文**（隐私 + 体积），只存能证明「这个 nonce 被提交了」的最小集。字段：
+
+     | 字段 | 为什么需要它 |
+     |---|---|
+     | `ack_version` | 记录 schema 版本；读者遇未知版本应**跳过**而非猜 |
+     | `nonce` | **与发送侧结果的唯一 join key**（per-send 唯一，故命中即本次） |
+     | `acked_at` | ISO8601 **带时区**——跨机比较需要偏移；也用于与发送侧的观察窗对时 |
+     | `protocol` | 信封协议版本（`ARBORIST-DIRECT:v1`），使未来换信封格式时旧记录仍可判读 |
+     | `receiver_brand` | 哪个 brand 的钩子写的。与 [ADR-0006](./decisions/0006-runtime-brand-is-routing-authority.md) 一致；也是「这个 brand 的钩子确实装上了」的唯一证据列 |
+     | `receiver_agent` | 接收方注册表 leaf 名（按 `session_id` 反查；未登记 ⇒ `null`）——让 ack 能对回注册表 |
+     | `receiver_project_path` / `receiver_project_id` | 接收方项目。`project_id` **由注册表 validator 那一份实现计算**，取不到即 `null`；**不得另写一套算法**（§2.3：两套派生算法必然让同一仓裂成两个 id） |
+     | `receiver_session_id` | 哪个**会话**提交的——注册表主键，比 agent 名更硬 |
+     | `hook_event` | 哪个钩子事件产生了本条，使记录可溯源到具体钩子 |
+     | `envelope_header` | 提交内容里**匹配到的信封头字段**（`from` / `from_brand` / `to` / `provenance`）——这是**钩子自己能证明的东西**，也让读者区分「正是那封」与「另一封恰好带 nonce 的信」。**扫描在信封头处终止，正文结构上进不来** |
+
+     - **未知一律记 `null`，不省略字段**：缺省字段与「钩子证不出这一项」不可区分（同焦点观测那节的「未知不得记成没发生」）。
+   - **接口（规范性 · 发送侧据此接线）**：`scripts/agenttui_submit_ack.py`（adopt 铺到 `<repo>/.trellis/scripts/`）。
+     - 接收侧：`record_submit_ack(payload, *, receiver_brand=None, log_path=None) -> (records, warnings)`；CLI `record`（钩子 payload 走 stdin）。
+     - 发送侧：`lookup_ack(nonce, log_path=None) -> dict`（含 `ack_status` ∈ {`acked`, `unconfirmed`}、`ack_count`、`acks`、`table_readable`、`reading_guidance`）与 `read_acks(nonce, log_path=None) -> list`（表整体读不到时 raise `AckTableUnreadable`——「我没法看」必须与「我看了没有」可区分）；CLI `lookup --nonce`，退出码 **0 = `acked`** / **1 = `unconfirmed`（缺 ack）** / **3 = 表读不到（同样是 `unconfirmed`）**；`print-path` 打印表位置。
+     - **`record` 的两条硬约束**（都有机械测试钉住）：**恒退出 0** 且 **stdout 恒为空**。理由不是洁癖：提交钩子非零退出会**阻断真人的一次提交**，而某些 brand 会把钩子 stdout 当作注入上下文 ⇒ 一次误 print 就改变了目标看到的东西。所有失败降级为 stderr 警告。
+   - **接线形态（两种，优先第一种）**：①**同级追加一条钩子命令**（既有钩子脚本**零改动**）；②把片段粘进既有钩子脚本。**优先 ① 的理由是判据层面的**：按 [verification-and-gates「新增的观测动作必须先证明它不扰动被观测者」](./verification-and-gates.md#新增的观测动作必须先证明它不扰动被观测者)，形态 ① 里既有脚本**字节层面未变**，该证明是**结构性**的；形态 ② 只能靠测试证明，而测试只覆盖被测到的那些输出。两形态的模板与逐 brand 接线见 Arborist 源树 `overlay/hook-templates/submit-ack/`（与 `overlay/workflow-customization.md` 同类：**adopter 手工接线物，不铺进产品仓**——接线要改的是 host 的 hook 配置，铺一份拷贝进来只会多一处会腐烂的副本）。
+     - **ack 记录**是新增的观测动作，其不扰动性另有两条机械证明：`record` 不执行任何外部命令、不读屏、不碰目标 pane（它跑在**接收侧自己的**钩子里，与投递路径无交集）；形态 ② 的片段有**差分测试**——同一个钩子 fixture 粘与不粘，stdout 与退出码逐字节相同。
+   - **⚠️ 发送侧消费尚未接线（截至本节写就时）**：上面的**读取接口已存在并有测试**，但随发 `scripts/agenttui.py` **尚未**调用它——即投递结果里还**没有** ack 相关字段，七值升级也**还没有**在代码里发生。本条按本节末「凡未实现处必须逐条标注」的纪律记在此处，**不得**把它读成「ack 已并入投递判定」。
 
 **投递前置校验（统一契约：动手前先验前提，验不过就拒绝，不猜、不静默降级）**：上面规则 5/6 各管一半前提；两半共用**同一形状**，故在此收成**一条**契约，避免各处再写各自的临时门。
 
@@ -364,6 +412,7 @@
   - **`pane_ref` 缺 socket 维度 ⇒ tmux transport 当前只支持默认 server**（2026-08-06 新增；**这一条是 schema 缺口，且残留一格静默误投风险，用前必读**）：tmux 的 `%N` **只在单个 tmux server 内唯一**，而 `pane_ref` 只有 `(multiplexer, session, pane_id)` 三元组、**没有 socket 字段**（`-L <名>` / `-S <路径>`）。随发 tmux transport 因此**只寻址默认 server**（命令不带 `-L`/`-S`）。若被登记的 pane 其实住在另一个 socket 上：多数情况是默认 server 上没有同号 pane ⇒ **响亮拒绝**（可接受）；但若默认 server 上**恰好**有同号 pane，探针的 session 名核对能挡下**名字不同**的那些，**同名同号仍会通过** ⇒ 残留**静默误投**（信封落进第三方 composer，正是 §2.2.1 判为最严重的那一格）。⇒ **在同时跑多个 tmux server 的机器上，除非确认目标 pane 在默认 socket 上，否则不得使用 tmux transport**。对因修法（加 `pane_ref.socket`，连带改 §2.2.1 唯一性三元组、validator、模板）**本次未做**；把 `session` 字段拿来存 socket 名是**明确禁止**的（字段名与内容不符 = 埋雷）。
   - **tmux 的「不抢焦点」只证到服务端状态层，未证到附着 client**（2026-08-06 新增）：全部 tmux 读数取自 **detached server**。adapter 因此把 `addressing_intrusion` 记为 `no-focus-command-issued`——该值的依据是**构造事实**「本次投递没有发出任何聚焦命令」，**不是**「已证明一个正在看的人没被打扰」；`tab_switched` 一律记 **`null`（未知）而非 `false`**。⇒ **不得**据此宣称迁移已消除侵入性成本；那需要一次 human 在场的 smoke test（zellij 侧同类缺口亦未闭合）。
   - **tmux 上的提交键语义未在真 ATUI 上验证**（2026-08-06 新增）：adapter 用 `send-keys -H 0d` / `-H 09` 直发契约字节（**刻意不用键名** `send-keys Enter`，键名会走复用器的按键编码，而 `extended-keys` 一类配置可能改变 Enter 的线上编码）。但**没有对一个真的 ATUI 做过 tmux 投递** ⇒ 「Enter=13 / Codex active=Tab=9 这套契约在 tmux 下照旧」目前是**推断**（同样是往 pty 写字节），不是实测。
+  - **规则 8 的发送侧消费**：**仍未实现**——ack 的**接收侧写入**与**读取接口**已随发（`scripts/agenttui_submit_ack.py`，有测试），但 `scripts/agenttui.py` 尚未查表，故投递结果里没有 ack 字段、七值也不会因 ack 升级。⇒ 在它接上之前，「ack 有而 transcript 无 ⇒ 不得重发」这条只对**人工判读**生效，机械路径上仍会返回一个未验证读数。
   规范先于实现落定是**刻意**的（契约是判据、实现向它收敛）；但**凡未实现处必须像这样逐条标注**，不得笼统写成「参考 adapter 已满足上述契约」。
 - **✅ 已收敛的条目（2026-07-30 实现，本清单据实改写；留档以便对照上面那两条仍缺的）**——同时列出**实现带来的已知代价**，别读成「无副作用」：
   - **规则 5 的存在性 preflight（解析合并文本）**：已实现——注入前用 `focus-pane-id` 探针并**按 stdout+stderr 合并文本**判 `Pane with id … not found` / `Session '…' not found`，**不把退出码当成功或拒绝依据**（原因见上方未解决矛盾）；探针失败即 `no-operational-route`、**零注入命令**。**禁用** `dump-screen -p`（对不存在 pane 静默返回空 + rc=0）作判据。
@@ -452,7 +501,7 @@
   - 区别的根子：**「读到空」不可信（可能是 pane 不存在），「读到内容」可信**。所以它能作阳性诊断，不能作存在性判定或送达判定。
 
 - **契约里的 nonce ≠ §5.2 自识别 nonce**（用途不同，勿混淆）：本节的 per-send nonce 是**送达证据**——证明「这一条信封确实进了对方 transcript」；§5.2（自登记步骤 2）的无桥接 nonce grep 是**自识别探针**——本会话往自己终端吐一个随机串、再回自己 brand 目录 grep 定位**自身** `session_id`/`session_file`。前者验对端送达、后者定位本端句柄，各自独立。
-- **证据是 per-send 运行时态，不入注册表**：字节边界 / nonce / marker 均随单次发送产生与消亡，注册表是静态发现表，**不**为其新增字段（`pane_ref` 只存寻址句柄，见 §2.2）。
+- **证据是 per-send 运行时态，不入注册表**：字节边界 / nonce / marker 均随单次发送产生与消亡，注册表是静态发现表，**不**为其新增字段（`pane_ref` 只存寻址句柄，见 §2.2）。规则 8 的 **submit-ack 表同理不是注册表的一部分**——它是一份**独立的 append-only 事件表**（`~/.arborist/submit-acks.jsonl`），与 `focus-intrusion.jsonl` 同类：per-send 事件流，不是发现快照，故注册表 leaf 不为它加任何字段，validator 也不查它。
 - **候选未来 transport（备注，非依赖）**：官方 **Channels** 能把外部事件推进一个已运行的 Claude Code 会话，是一个**候选未来投递 transport**（成熟后可作满足本契约的又一 adapter 后端）；但它当前仍是 **research preview**、且**需会话启动时显式 opt-in**，故**暂不作 Arborist 默认依赖**（与「可插拔 adapter、opt-in、transport 中立」一致）。
 
 ## 4. 生命周期与角色分工

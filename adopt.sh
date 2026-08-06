@@ -46,6 +46,12 @@ cp "$SRC/scripts/agenttui.py" "$ROOT/.trellis/scripts/"; chmod +x "$ROOT/.trelli
 # brand-capacity observer（单写者容量观测 + 建 Impler 前只读推荐；不启停会话/不改注册/不碰凭证）。
 # 同样靠 __file__.parents[2] 定位 repo root，须放 .trellis/scripts/（两级深）。
 cp "$SRC/scripts/arborist_brand_capacity.py" "$ROOT/.trellis/scripts/"; chmod +x "$ROOT/.trellis/scripts/arborist_brand_capacity.py"
+# 接收侧 submit-ack 握手（投递契约规则 8 的因果判据）：本仓的提交钩子据此追加一条 ack，
+# 发送侧据此把「未验到」与「未提交」分开。放 .trellis/scripts/ 有两个理由：①它按 __file__ 同级
+# 找 validate_agenttui_registry.py 复用那一份 project_id 算法（不另写一套）；②hook 片段按
+# `<repo>/.trellis/scripts/` 发现它。**接线是手工的**（改 host 的 hook 配置），模板见
+# overlay/hook-templates/submit-ack/ 与 ADOPT.md 手动收尾第 2 步。
+cp "$SRC/scripts/agenttui_submit_ack.py" "$ROOT/.trellis/scripts/"; chmod +x "$ROOT/.trellis/scripts/agenttui_submit_ack.py"
 # harness 机械门 validator 四件（只读校验，无网络、无凭证）：
 #   validate_adr_numbers.py         —— ADR 四位编号唯一 + ADR 文件对「记规范那个 git」可见
 #                                      （--visibility machine-local|product-git，缺失/歧义 fail closed）
@@ -370,11 +376,16 @@ cat <<'NEXT'
 ✓ overlay 已叠加。手动收尾：
   1) 把 overlay/workflow-customization.md 的定制层块粘进 .trellis/workflow.md（Core Principles 后），替换 <占位>。
      并按其尾注调整 Phase 1/2/3（research-first 前置、breadcrumb→SP、验证拓扑、ADR/HITL、defer git、WIMTB）。
-  2) brand compatibility 已机械写入 AGENTS.md 与 workflow Phase Index；可跑
+  2) 接收侧 submit-ack 接线（跨 ATUI 直投的因果送达判据）：agenttui_submit_ack.py 已铺到
+     .trellis/scripts/，但**接线要改 host 的 hook 配置，脚本不代改**。首选在你 brand 的
+     UserPromptSubmit hook 数组里、既有那条之后追加一条命令（既有钩子脚本零改动）；
+     逐字模板与另一种形态见 overlay/hook-templates/submit-ack/README.md。
+     装完跑 `python3 .trellis/scripts/agenttui_submit_ack.py print-path` + README 的三步探针。
+  3) brand compatibility 已机械写入 AGENTS.md 与 workflow Phase Index；可跑
      `python3 scripts/install-brand-compat.py --source-tree /path/to/Arborist --check` 验证。
-  3) 用 Multica 则设 env：MULTICA_WORKSPACE_ID / TRELLIS_MULTICA_PROJECT_ID，并在 .trellis/config.yaml 挂 hooks + session_auto_commit: false。
-  4) 用 codegraph 则 `codegraph init && codegraph install`。
-  5) 重启 AI session。harness 改动走 ./hgit（log/diff/checkout 回退）；落定用
+  4) 用 Multica 则设 env：MULTICA_WORKSPACE_ID / TRELLIS_MULTICA_PROJECT_ID，并在 .trellis/config.yaml 挂 hooks + session_auto_commit: false。
+  5) 用 codegraph 则 `codegraph init && codegraph install`。
+  6) 重启 AI session。harness 改动走 ./hgit（log/diff/checkout 回退）；落定用
      `./hgit snapshot --dry-run` 复核后 `./hgit snapshot && ./hgit commit -m "..."`
      —— snapshot 按显式 durable 白名单暂存并剔掉凭证/缓存/备份，不依赖 untracked 可见性。
 NEXT
