@@ -73,10 +73,16 @@ cp "$SRC/scripts/agenttui_submit_ack.py" "$ROOT/.trellis/scripts/"; chmod +x "$R
 #                                      派生的 project_id，而不是手抄一个字面值。
 #                                      它不靠 __file__ 推仓根，读的是全局 `~/.arborist/index.json`
 #                                      （`--global-index` 可改），故放哪一级都能跑。
+#   validate_tool_entry_forms.py    —— tool.json 的 invoke 与 availability 必须指向同一个
+#                                      入口形态（全局 shim vs 项目内副本），且 scope 与之相符。
+#                                      危害不是探测失败而是**探测通过却证明了另一个东西**：
+#                                      拿项目副本证明全局入口可用时，读表方会把一个可能根本
+#                                      没铺的入口当成可用。只读、无 --fix；路径读不出即退 2
+#                                      （fail closed）。它按给定路径工作，不推仓根。
 # 前三个靠 __file__.parents[2] 定位 repo root，须放 .trellis/scripts/（两级深）；
 # 该目录整面已在 overlay/scripts/hgit 的 SNAPSHOT_PATHS 与侧史 allowlist 里，无需另加条目。
 for validator in validate_adr_numbers.py validate_harness_persistence.py validate_claim_provenance.py \
-                 validate_agenttui_registry.py; do
+                 validate_agenttui_registry.py validate_tool_entry_forms.py; do
   cp "$SRC/scripts/$validator" "$ROOT/.trellis/scripts/"
   chmod +x "$ROOT/.trellis/scripts/$validator"
 done

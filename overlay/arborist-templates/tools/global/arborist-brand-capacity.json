@@ -1,0 +1,23 @@
+{
+  "name": "arborist-brand-capacity",
+  "description": "单写者本地 observer：观测 supported-brand 容量并在建新 Impler 前给只读推荐 —— 全局单份权威入口形态（各仓经 --repo 指明调用方仓根）。只观测、不启停会话、不改注册、不代写 brand、不碰凭证。",
+  "kind": "cli",
+  "invoke": {
+    "cli": "\"${ARBORIST_HOME:-$HOME/.arborist}/bin/arborist_brand_capacity\" --repo <CALLER_REPO_ROOT> {refresh|status|report|recommend|serve} --help"
+  },
+  "scope": "global",
+  "requirement": "optional",
+  "install": "随 Arborist/Trellis harness 下发。全局入口 = <ARBORIST_HOME>/bin/<shim>，指向单份权威脚本；shim 由 gardener 铺设，并须导出 ARBORIST_ENTRY_FORM=global-authority。stdlib-only，无需另装依赖；各 brand 容量需其本机 CLI 已登录，但 observer 不读/存/传其 token。",
+  "fallback": "全局入口不可用时退回本仓 adopted copy（`python3 .trellis/scripts/arborist_brand_capacity.py`，无需 --repo）。都不可用时不阻塞派活：容量退化为 unknown，改由人工按 role affinity 选 brand 并停下确认，绝不把 unknown/stale 当 fresh headroom。",
+  "availability": "\"${ARBORIST_HOME:-$HOME/.arborist}/bin/arborist_brand_capacity\" --help —— 探测的必须是本条 `invoke` 用的**同一个入口形态**（见 agenttui-direct 全局条目同一节的理由）。快照现况另用 `status --repo <CALLER_REPO_ROOT>` 只读探测。",
+  "auth": "无网络、无鉴权；不读/存/打印任何凭据。Claude collector 借本机 CLI 已有登录态运行内置用量查询，但绝不读取/复制/传递 token。",
+  "notes": "**全局入口必须显式 `--repo <调用方仓根>`，且本条比投递侧更硬**：缺 `--repo` 时 `status` 曾以 **rc=0** 返回**承载权威脚本那个仓**的快照——格式完好、`generated_at` 与各品牌观测值都属别人，调用方无从察觉（已实测发生）。投递侧至少常在后续 registry 读取处失败；这里没有任何兜底 ⇒ 「推导成功但仓错误」。故本入口在读取任何仓状态之前拒绝。项目内 adopted copy 不受此限（`__file__` 确实在调用方仓内）。其余契约（推荐仅建新 Impler 前合法、写者子命令取单写者 flock、serve 非 daemon）与项目副本形态相同，见 spec/guides/agenttui-launch-and-brand-capacity.md 与 ADR-0008。",
+  "known_limits": [
+    "入口形态判定依赖 shim 导出 ARBORIST_ENTRY_FORM：未导出时靠结构判据兜底（脚本不在 .trellis/scripts/ ⇒ 要求 --repo），方向安全但错误信息不如显式声明清楚",
+    "锁的粒度仍随 --repo 走：`<repo>/.arborist/runtime/brand-capacity.lock` ⇒ 不同 --repo 值各自一把锁，**机器级互斥不成立**（多仓可同时 refresh 同一账号）→ 需要机器级单写者时必须把 state/lock/reports 显式指到机器级路径",
+    "闭集限定：supported_brands 只来自 host 路由配置；不在闭集的已装 CLI 永不进候选",
+    "被动读数可能陈旧：靠 observed_at + --max-age-seconds 判，超龄退化为 unknown-for-selection",
+    "cost / burn rate / time-to-boundary 非 headroom：不进 used_percent，至多进 diagnostics",
+    "multi-account 不区分：共享会话目录的多账户不做分区/歧义检测，取全局最新观测 → 须人工判定当前会话账户容量"
+  ]
+}

@@ -18,6 +18,19 @@
 - **git 隐身**：`.arborist/` 是机器本地态，须列入 `.git/info/exclude` + `.gitignore`（adopt 脚手架已代劳）；全局 `~/.arborist/` 天然在仓外。
 - **泛化边界**（[generalization-boundary](./generalization-boundary.md)）：本 guide 与模板只含占位/泛化示例；端口、域名、二进制路径、版本号等**实例具体值只进机器本地的 `tool.json` 实体条目**，凭据则连实体条目也不进（见 §2 `auth`）。
 
+### 1.1 入口形态一致性：`invoke` 与 `availability` 不得混用两级入口（规范性 · 有机械执行者）
+
+一条能力可以有两种**入口形态** —— 全局单份权威入口（`<ARBORIST_HOME>/bin/<shim>`）与项目内 adopted copy（`<repo>/.trellis/scripts/<x>.py`）。两者的**仓根语义相反**（全局入口无从知道谁在调它，必须显式 `--repo`；项目副本的 `__file__` 确实在调用方仓里，推导正确），完整规范见 [agenttui-registry §1.1](./agenttui-registry.md#11-入口形态与仓根归属规范性--机械执行者见下--fail-closed-方向已定)。
+
+> **规范：同一条目里 `invoke` 与 `availability` 指向的入口形态必须一致。**
+
+**实测形状（本机两条已安装条目）**：`invoke.cli` 走全局 shim，而 `availability` 仍是 `python3 .trellis/scripts/<脚本>.py --help` —— 这条目**一边教人调全局入口、一边拿项目副本证明它可用**。危害不是「探测失败」（项目副本通常也在，所以探测会**通过**），而是**探测通过却证明了另一个东西**：读表方据此认为全局入口可用，而它可能根本没铺。这正是[「测试的结构必须与真实调用路径同构」](./verification-and-gates.md#门的回归必须端到端且测试的结构必须与真实调用路径同构)在注册表这一层的实例 —— `availability` 就是这条目的「测试」。
+
+- **`scope` 必须与入口形态一致**：全局入口形态 ⇒ `scope: global`；项目副本形态 ⇒ `scope: project`。全局条目**不得**教下游去调各仓自己的那一份。
+- **`fallback` 里提另一形态是正当的**（「全局入口不可用时退回本仓副本」），故它**不**参与一致性判定 —— 把它算进来会把一条正确的兜底判成不一致。
+- **机械执行者**：`python3 .trellis/scripts/validate_tool_entry_forms.py <tool.json 或目录>...`。只读，无 `--fix`（「这条目该是哪一级」是 gardener 的裁定）。退出码 `0` 一致 / `1` 混用形态或 `scope` 不符 / `2` 路径不存在或 JSON 不可解析（**fail closed** —— 读不出这条目不等于这条目没问题）。**必答时刻**：登记或改动任何 `tool.json` 之后；gardener 维护 `~/.arborist/tools/` 时对全表跑一次。
+- **模板**：项目副本形态见 `arborist-templates/tools/<name>.json`；全局入口形态见 `arborist-templates/tools/global/<name>.json`。两套并存是刻意的 —— 对外 adopter 拿到的仍是 copy 形态，本机单份化不得让 adopt 路径退化。
+
 ## 2. `tool.json` schema
 
 | 字段 | 说明 |

@@ -6,6 +6,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
 ## [Unreleased]
 
 ### Added
+- **An interface that silently falls back to some default target when a locating argument is missing must be
+  wrapped fail-closed at our layer** (`verification-and-gates.md` general rule + `agenttui-registry.md`
+  §1.1 instance + `tool-registry.md` §1.1 entry-form consistency) — **the third time this repository has hit
+  the same shape**, which is why it is a general rule rather than a third fix. The first two were on the
+  multiplexer side (`display-message -p -t <nonexistent>` answers **rc=0 and silently falls back to the
+  *current* pane's attributes** — well-formed output belonging to somebody else's pane; `dump-screen -p
+  --pane-id <nonexistent>` answers **rc=0 and empty**, read as "the pane is there, the screen is just
+  blank"). The third appeared **in our own scripts**: a single machine-wide capability entry point invoked
+  without `--repo` inferred the caller's repository root from its own `__file__` and got **the repository
+  that hosts the authority script**. Criterion, reusable and not a description of this fix: *if an interface
+  still answers rc=0 when a "which one / where / to whom" argument is missing, if what it returns is
+  **well-formed** (and therefore reads like success), and if the caller **cannot tell from the return value
+  itself** whether it got its own target or the default the interface chose for it — then it may not be used
+  directly as a criterion or an enforcement surface.* The wrapping direction is fixed: **when you cannot
+  tell who you should be addressing, demand it explicitly instead of silently picking one.** Discipline
+  ("remember to pass the argument") cannot be the executor here — it has no product, and all three
+  instances were documented as requiring the argument while being omitted anyway, precisely because nothing
+  failed when it was. The executor is refusal on the *callee* side plus an end-to-end regression that
+  traverses the real entry form.
+
 - **A gate's regression must be end-to-end, and the test's structure must be isomorphic to the real call
   path** (`verification-and-gates.md`, cross-referenced from `sendbox.md`'s claim-provenance contract and
   from `agenttui-registry.md` §5.0-b) — **"the segment under test is correct" and "the gate will actually refuse"
@@ -265,6 +285,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   ack may therefore only *prevent* a downgrade, never cause one. Not implemented, and stated as a gap in
   the guide: `agenttui.py` does not consult the table yet, so no delivery result carries an ack field and
   the seven-value upgrades are, for now, a human reading rather than a mechanical one.
+
+### Fixed
+- **Global capability entry points now refuse to guess the caller's repository root** (`agenttui.py`,
+  `arborist_brand_capacity.py`, new `validate_tool_entry_forms.py`, new global-form tool templates under
+  `arborist-templates/tools/global/`) — a live defect found by read-only re-verification downstream, with an
+  observable **wrong-repo success**. Two entry forms exist and their repo-root semantics are **opposite**: an
+  adopted copy at `<repo>/.trellis/scripts/` may correctly infer the root from its own location, whereas a
+  machine-wide authority copy invoked through a shim cannot — `parents[2]` there names the repository that
+  *hosts the script*. The pre-existing root gate could not separate the two: it only proves the derived path
+  *looks like* a project repository, and the authority's host does. Readings: on the messaging side a missing
+  `--repo` was **not refused by the gate** but kept executing against the authority repository, failing later
+  only because that repository *happened* to have no agent by the requested name — with a same-named agent it
+  is a **mis-delivery** (`agenttui-registry.md` §2.2.1: a failure that can be seen always beats a success that
+  cannot). On the capacity-observation side it was strictly worse: **rc=0**, returning the authority
+  repository's snapshot — well-formed, with someone else's observation values, and nothing downstream to fail.
+  Now: every subcommand that reads or writes project state refuses **before reading any repository state**
+  when the entry form is not an adopted project copy, with a dedicated exit code for the messaging adapter so
+  "which repo?" and "the registry says no" no longer share one. The form is decided by an **explicit signal**
+  (`ARBORIST_ENTRY_FORM`, which a shim must export), falling back to a **structural check of the inference's
+  own stated precondition** (is this script really at `.trellis/scripts/`?) — an unrecognised signal value is
+  `unknown` rather than a fallback to structure, so a typo cannot silently re-enable inference, and anything
+  undecidable demands explicit `--repo`. The only exemption is top-level `--help`, exempt by *call order*
+  (argparse handles it before the gate) rather than by a list that could rot. Second hop closed too: the
+  envelope's `reply_command` now carries the **already-resolved** `--repo`, preferring the stable global shim
+  form — previously it carried only the authority script path, so a replier following the envelope fell back
+  into the same wrong-repo inference. Tool entries gain a mechanical consistency check: `invoke` and
+  `availability` must name the **same** entry form (the observed shape was `invoke` pointing at the global shim
+  while `availability` probed a project copy — which *passes* and thereby proves something else entirely,
+  leaving readers to treat a possibly-uninstalled entry point as available), and `scope` must match. The
+  regression is subprocess-based on purpose: the criterion is read from `__file__`'s real location and the
+  process environment, so the difference between the two entry forms is **structurally invisible** to an
+  in-process import — including a fixture where **both** repositories hold a same-named agent, pinning down
+  the accident that the earlier reading merely got lucky on.
 
 ### Changed
 - **Session cleanup is recommended through the multiplexer's own option again, and its arming moment is now a measured hard rule**

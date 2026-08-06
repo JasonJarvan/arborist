@@ -16,7 +16,7 @@ import sys
 import time
 import tempfile
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
@@ -194,6 +194,12 @@ EXIT_UNCERTAIN_DELIVERY = 2
 # route itself was fine — only the Codex turn state was unreadable. A distinct
 # code so a caller can tell "repair the route" from "read the state again".
 EXIT_PRE_INJECTION_REJECTED = 4
+# The caller's repository root could not be established without guessing, so
+# nothing was read and nothing was written. A distinct code because the previous
+# behaviour — silently inferring a root from this script's own location — is what
+# produced runs that succeeded against the WRONG repository; "which repo?" and
+# "the registry says no" must not share an exit code.
+EXIT_REPO_ROOT_UNSPECIFIED = 5
 
 # Whether addressing the target disturbed it. Measured, not predicted: the focus
 # probe answers rc=0 when it actually moved the focus (someone's view was pulled
@@ -277,6 +283,15 @@ class RegistryError(RuntimeError):
     """The registry is incomplete, inconsistent, or unsafe to use."""
 
 
+class RepoRootUnspecified(RegistryError):
+    """The caller's repository root is not knowable without guessing.
+
+    A subclass of RegistryError so that every existing caller keeps refusing, but
+    a distinct type so the entry point can report it with its own exit code
+    instead of burying it in the generic registry-error channel.
+    """
+
+
 class CodexTurnStateUnknown(RegistryError):
     """No safe Codex submit key can be chosen, and nothing has been sent yet.
 
@@ -321,6 +336,101 @@ def looks_like_project_repo(path: Path) -> bool:
 def infer_repo_root(script_path: Path) -> Path:
     """Unvalidated inference: this script is adopted at <repo>/.trellis/scripts/."""
     return script_path.resolve().parents[2]
+
+
+# --- Entry form: which copy of this script is running ------------------------
+# Two entry forms exist and they need OPPOSITE defaults for "no --repo given":
+#
+#   project-copy      <repo>/.trellis/scripts/agenttui.py -- adopted into the
+#                     caller's own repository. parents[2] really IS the caller's
+#                     repo root, so inferring it is correct and must keep working.
+#   global-authority  one machine-wide copy, invoked through a shim from any
+#                     repository. parents[2] is the repository that HOSTS the
+#                     authority copy, which has nothing to do with the caller.
+#
+# resolve_repo_root() cannot separate these: it only proves the derived path
+# *looks like* a project repository — and the authority's host does. The observed
+# result is a run that succeeds against the WRONG repository. Per §2.2.1 of
+# agenttui-registry ("mis-delivery is more severe than unreachability"), a
+# visible failure is always better than an invisible success, so the global form
+# must refuse rather than infer.
+ENTRY_FORM_ENV = "ARBORIST_ENTRY_FORM"
+ENTRY_FORM_GLOBAL = "global-authority"
+ENTRY_FORM_PROJECT = "project-copy"
+ENTRY_FORM_UNKNOWN = "unknown"
+ENTRY_FORMS = (ENTRY_FORM_GLOBAL, ENTRY_FORM_PROJECT)
+# The layout that infer_repo_root()'s parents[2] arithmetic is built on, read
+# from the script outward: <repo>/.trellis/scripts/<script>. Checking it is not
+# path guessing — it is verifying the inference's own stated precondition before
+# trusting the inference. It is the *backstop*; the declared signal above wins.
+ADOPTED_SCRIPT_ANCESTRY = ("scripts", ".trellis")
+
+
+def classify_entry_form(
+    script_path: Path,
+    env: Mapping[str, str] | None = None,
+) -> tuple[str, str]:
+    """Return ``(entry_form, evidence)``; never guesses in the unsafe direction.
+
+    Precedence: the declared signal (set by whoever installed the entry point)
+    beats structure, because only the installer knows what it built. An
+    unrecognised declared value is ``unknown`` rather than a fallback to
+    structure — a typo in the signal must not silently re-enable inference.
+    """
+    environ = os.environ if env is None else env
+    declared = environ.get(ENTRY_FORM_ENV)
+    if declared:
+        if declared in ENTRY_FORMS:
+            return declared, f"{ENTRY_FORM_ENV}={declared}"
+        return (
+            ENTRY_FORM_UNKNOWN,
+            f"{ENTRY_FORM_ENV}={declared!r} is not one of "
+            f"{', '.join(ENTRY_FORMS)}",
+        )
+    resolved = script_path.resolve()
+    ancestry = tuple(parent.name for parent in resolved.parents[:2])
+    if ancestry == ADOPTED_SCRIPT_ANCESTRY:
+        return (
+            ENTRY_FORM_PROJECT,
+            f"{ENTRY_FORM_ENV} unset; this script sits at the adopted location "
+            f".trellis/scripts/{resolved.name}, so its repo-root inference holds",
+        )
+    return (
+        ENTRY_FORM_UNKNOWN,
+        f"{ENTRY_FORM_ENV} unset and this script does not sit at "
+        f".trellis/scripts/{resolved.name} (found .../{'/'.join(reversed(ancestry))}"
+        f"/{resolved.name}), so its repo-root inference has no basis",
+    )
+
+
+def resolve_caller_repo_root(
+    explicit: Path | None,
+    *,
+    script_path: Path,
+    env: Mapping[str, str] | None = None,
+) -> Path:
+    """The single gate every project-state command passes before reading anything.
+
+    Deliberately no exemptions: every subcommand of this script reads or writes
+    project state (send/heartbeat/stop/status all go through the repo's
+    ``.arborist/``). ``--help`` is exempt only because argparse handles it during
+    parsing, before this runs — an exemption granted by the call order, not by a
+    list here that could rot.
+    """
+    if explicit is not None:
+        return resolve_repo_root(explicit, explicit=True)
+    form, evidence = classify_entry_form(script_path, env)
+    if form != ENTRY_FORM_PROJECT:
+        raise RepoRootUnspecified(
+            "refusing to infer the caller's repository root: entry form is "
+            f"{form!r} ({evidence}). A global entry point must be told "
+            "the caller's repo root explicitly — pass --repo <caller repo root>. "
+            "Nothing was read and nothing was written: inferring here would "
+            "silently target the repository that hosts this script, and a run "
+            "that succeeds against the wrong repository is worse than one that "
+            "refuses"
+        )
+    return resolve_repo_root(infer_repo_root(script_path), explicit=False)
 
 
 def resolve_repo_root(candidate: Path, *, explicit: bool) -> Path:
@@ -698,6 +808,25 @@ def build_delivery_marker(
     return " ".join(delivery_marker_fields(sender, target, nonce))
 
 
+def reply_entry_argv(script_path: Path, env: Mapping[str, str] | None = None) -> list[str]:
+    """The argv prefix a replier should use, preferring the stable global entry.
+
+    The global shim is preferred because it is a single machine-wide path that
+    stays valid even if the authority copy moves, whereas ``script_path`` is only
+    valid while this particular copy exists where it is now. Falling back to
+    ``python3 <script_path>`` is fine *because* the caller's repo travels in
+    --repo either way (see build_envelope): the entry form is an optimisation,
+    the --repo is the correctness requirement.
+    """
+    environ = os.environ if env is None else env
+    home = environ.get("ARBORIST_HOME")
+    global_root = Path(home) if home else Path.home() / ".arborist"
+    shim = global_root / "bin" / "agenttui"
+    if shim.is_file() and os.access(shim, os.X_OK):
+        return [str(shim)]
+    return ["python3", str(script_path)]
+
+
 def build_envelope(
     sender: AgentRecord,
     target: AgentRecord,
@@ -705,14 +834,22 @@ def build_envelope(
     *,
     nonce: str,
     script_path: Path,
+    repo: Path,
+    env: Mapping[str, str] | None = None,
 ) -> str:
     if not message.strip():
         raise RegistryError("message must not be empty")
     marker_fields = delivery_marker_fields(sender, target, nonce)
+    # --repo is mandatory here, not a nicety: without it the replier re-derives
+    # the repo root from whatever copy of the script it happens to run, which is
+    # exactly the wrong-repo failure this envelope's own sender just avoided. The
+    # repo was already resolved once, in this process; propagate that answer
+    # rather than making the second hop guess again.
     reply_command = shlex.join(
         [
-            "python3",
-            str(script_path),
+            *reply_entry_argv(script_path, env),
+            "--repo",
+            str(repo),
             "send",
             "--from",
             target.name,
@@ -1865,7 +2002,14 @@ def plan_delivery(
     ):
         codex_submit_activity = require_codex_submit_activity(target.session_file)
     envelope = build_envelope(
-        sender, target, message, nonce=nonce, script_path=script_path
+        sender,
+        target,
+        message,
+        nonce=nonce,
+        script_path=script_path,
+        # The repo this process already resolved -- the second hop must not
+        # re-derive it.
+        repo=repo,
     )
     route = build_route(
         routed_target,
@@ -2164,11 +2308,13 @@ def create_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "repository containing .arborist/ (default: inferred from this "
-            "script's location, then validated — the inferred path must itself "
-            "contain .trellis/ or .git/, otherwise the run is refused instead of "
-            "reading or creating a registry somewhere else; pass this explicitly "
-            "when running the script from outside a project repository)"
+            "repository containing .arborist/. REQUIRED when running through a "
+            "global entry point (shim): a machine-wide copy cannot know which "
+            "repository is calling it, and inferring would target the repository "
+            "that hosts the script. Only an adopted copy at "
+            ".trellis/scripts/ may omit it — there the inference is correct, and "
+            "the inferred path is still validated (must contain .trellis/ or "
+            ".git/) instead of reading or creating a registry somewhere else"
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -2899,10 +3045,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = create_parser()
     args = parser.parse_args(argv)
     try:
-        repo = resolve_repo_root(
-            args.repo if args.repo is not None else infer_repo_root(Path(__file__)),
-            explicit=args.repo is not None,
-        )
+        # Before any subcommand runs, i.e. before any repository state is read.
+        repo = resolve_caller_repo_root(args.repo, script_path=Path(__file__))
         if args.command == "send":
             return command_send(args, repo)
         if args.command == "heartbeat":
@@ -2911,6 +3055,11 @@ def main(argv: list[str] | None = None) -> int:
             return command_state(args, repo, "stopped")
         if args.command == "status":
             return command_status(args, repo)
+    except RepoRootUnspecified as exc:
+        # Its own exit code, and stderr only: there is no delivery outcome to
+        # report because no repository was ever opened.
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_REPO_ROOT_UNSPECIFIED
     except CodexTurnStateUnknown as exc:
         # Structured, non-zero, and mechanically zero pane commands: this refusal
         # is raised while planning, before the existence probe (itself a pane
