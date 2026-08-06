@@ -13,7 +13,13 @@ Six checks run over one global index plus the project leaf trees it points at:
    mis-registration, and a reader of the wrong one attributes an agent working
    in repo A to repo B.
 2. **`pane_ref` uniqueness among reachable leaves** — one pane, one *live*
-   agent, keyed on the `(multiplexer, session, pane_id)` triple. Formally a
+   agent, keyed on `(multiplexer, socket, session, pane_id)`. The socket belongs
+   in the key because a pane id can be unique only *within one multiplexer
+   server*: leave it out and two different real panes on two servers collapse
+   into one key (a fabricated conflict), while two leaves that genuinely contend
+   for one pane can be told apart by a spelling difference (a missed one). An
+   absent socket normalises to the default server's name, so pane_refs written
+   before the field existed still compare correctly. Formally a
    corollary of check 1, but checked independently because two *different*
    sessions naming the same pane means at least one `pane_ref` has already
    rotted (pane refs are start-time snapshots, guide §2.2), and the consequence
@@ -160,6 +166,20 @@ PANE_CWD_NOT_ACQUIRED = (
 # value — counts as reachable for the pane_ref uniqueness check (see
 # `is_reachable_state`).
 UNREACHABLE_STATES = ("stopped",)
+
+# `pane_ref.socket` — which multiplexer *server* the pane id belongs to. Optional
+# (absent = that transport's default server) and part of the uniqueness key,
+# because a pane id can be unique only within one server: without this dimension
+# two *different* real panes on two servers collapse into one key (a false
+# conflict) and two leaves that really do contend for one pane can look distinct.
+#
+# The default socket really is *named* `default`, so an absent field and an
+# explicit `"default"` must compare equal — otherwise uniqueness would be enforced
+# on spelling instead of on the pane. Mirrors `normalize_pane_ref_socket` in
+# `agenttui.py`; a test pins both implementations to the same answers. Not
+# imported from there on purpose: this validator runs no delivery code and must
+# stay usable in a tree where only it was deployed.
+PANE_REF_DEFAULT_SOCKET = "default"
 
 
 class GlobalIndexError(RuntimeError):
@@ -410,9 +430,17 @@ def leaf_reading(leaf: Leaf) -> str:
     """Every reading a tiebreak needs from one claimant, verbatim as written."""
 
     runtime = leaf.runtime
-    key = pane_ref_key(runtime.get("pane_ref"))
+    pane_ref = runtime.get("pane_ref")
+    key = pane_ref_key(pane_ref)
+    # The socket is shown *as written* as well as normalised: the two compare equal
+    # for uniqueness, but a ruling is easier to make when "the writer said nothing"
+    # stays distinguishable from "the writer said default" (see `reading_value`).
+    socket_written = reading_value(
+        pane_ref.get("socket") if isinstance(pane_ref, dict) else None
+    )
     pane = (
-        f"(multiplexer={key[0]}, session={key[1]}, pane_id={key[2]})"
+        f"(multiplexer={key[0]}, socket={key[1]} [as written: {socket_written}], "
+        f"session={key[2]}, pane_id={key[3]})"
         if key is not None
         else "absent-or-unusable"
     )
@@ -487,15 +515,38 @@ def check_session_id_uniqueness(leaves: Sequence[Leaf]) -> list[Finding]:
     return findings
 
 
-def pane_ref_key(pane_ref: Any) -> tuple[str, str, str] | None:
-    """Return the `(multiplexer, session, pane_id)` triple, or None if unusable."""
+def normalize_pane_ref_socket(socket: Any) -> str:
+    """Lexical identity of the addressed server; absent == the default name.
+
+    Purely lexical on purpose: a socket *path* is never resolved against a socket
+    *name*, because that mapping depends on the socket directory and uid of
+    whoever wrote the leaf and is not derivable from the leaf itself. The residual
+    gap — one server written once as a name and once as a path compares unequal, so
+    a real conflict between those two spellings is not reported — is recorded in
+    agenttui-registry.md §3 rather than closed by a guess. A non-string is treated
+    as absent; the field's own well-formedness is the writer's contract, and
+    guessing a server here is the one thing worth never doing.
+    """
+
+    if not isinstance(socket, str):
+        return PANE_REF_DEFAULT_SOCKET
+    return socket.strip() or PANE_REF_DEFAULT_SOCKET
+
+
+def pane_ref_key(pane_ref: Any) -> tuple[str, str, str, str] | None:
+    """Return `(multiplexer, socket, session, pane_id)`, or None if unusable.
+
+    The socket dimension is what makes this a key for *a pane* rather than for a
+    pane *number*: pane ids can be unique only within one multiplexer server.
+    """
 
     if not isinstance(pane_ref, dict):
         return None
     values = [pane_ref.get(field) for field in ("multiplexer", "session", "pane_id")]
     if any(not isinstance(value, str) or not value for value in values):
         return None
-    return (values[0], values[1], values[2])  # type: ignore[return-value]
+    socket = normalize_pane_ref_socket(pane_ref.get("socket"))
+    return (values[0], socket, values[1], values[2])  # type: ignore[return-value]
 
 
 def is_reachable_state(runtime: dict[str, Any]) -> bool:
@@ -532,7 +583,7 @@ def check_pane_ref_uniqueness(
       false positives, and a validator people learn to ignore is worse than none.
     """
 
-    grouped: defaultdict[tuple[str, str, str], list[Leaf]] = defaultdict(list)
+    grouped: defaultdict[tuple[str, str, str, str], list[Leaf]] = defaultdict(list)
     stale: list[Finding] = []
     for leaf in leaves:
         key = pane_ref_key(leaf.runtime.get("pane_ref"))
@@ -541,13 +592,13 @@ def check_pane_ref_uniqueness(
         if is_reachable_state(leaf.runtime):
             grouped[key].append(leaf)
             continue
-        multiplexer, session, pane_id = key
+        multiplexer, socket, session, pane_id = key
         stale.append(
             Finding(
                 "stale-addressing-handle",
                 f"{leaf.where} declares state "
                 f"{leaf.runtime.get('state')!r} but still carries pane_ref "
-                f"(multiplexer={multiplexer}, session={session}, "
+                f"(multiplexer={multiplexer}, socket={socket}, session={session}, "
                 f"pane_id={pane_id}). Leftover addressing handle: clear it in "
                 "bulk. It is excluded from pane_ref uniqueness on purpose — the "
                 "pane has most likely been reused by a later session, which is "
@@ -559,7 +610,7 @@ def check_pane_ref_uniqueness(
     for key, claimants in sorted(grouped.items()):
         if len(claimants) < 2:
             continue
-        multiplexer, session, pane_id = key
+        multiplexer, socket, session, pane_id = key
         listed = " and ".join(leaf.where for leaf in claimants)
         session_ids = {
             leaf.runtime.get("session_id")
@@ -575,8 +626,9 @@ def check_pane_ref_uniqueness(
         conflicts.append(
             Finding(
                 "pane-ref-conflict",
-                f"pane_ref (multiplexer={multiplexer}, session={session}, "
-                f"pane_id={pane_id}) is claimed by more than one reachable leaf: "
+                f"pane_ref (multiplexer={multiplexer}, socket={socket}, "
+                f"session={session}, pane_id={pane_id}) is claimed by more than "
+                f"one reachable leaf: "
                 f"{listed}.{rot} Two live agents contending for one pane means "
                 "delivery lands in a third party's session, silently; rebuild "
                 "the whole pane_ref, do not edit single fields."
@@ -763,8 +815,10 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "failures (exit 1; each reported with its own code):\n"
             "  duplicate-session-id     one session claimed by leaves in 2+ projects\n"
-            "  pane-ref-conflict        one (multiplexer, session, pane_id) claimed by\n"
-            "                           two *reachable* leaves = live mis-delivery risk\n"
+            "  pane-ref-conflict        one (multiplexer, socket, session, pane_id)\n"
+            "                           claimed by two *reachable* leaves = live\n"
+            "                           mis-delivery risk (socket is in the key because a\n"
+            "                           pane id can be server-unique only; absent = default)\n"
             "                           (both of the above print the readings a tiebreak\n"
             "                           needs; the ruling is global and is not made here,\n"
             "                           and the pane's real cwd is never auto-acquired)\n"

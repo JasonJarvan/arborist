@@ -458,6 +458,113 @@ class PaneRefUniquenessTests(FixtureTestCase):
         self.assertEqual(code, 0, out)
 
 
+class PaneRefSocketDimensionTests(FixtureTestCase):
+    """The socket belongs in the uniqueness key: a pane id can be server-unique.
+
+    Without it the check answers wrongly in *both* directions — two different
+    real panes on two servers report a conflict that does not exist, and two
+    leaves that really do contend for one pane can hide behind a spelling.
+    """
+
+    @staticmethod
+    def pane(**overrides: Any) -> dict[str, str]:
+        base = {"multiplexer": "mux", "session": "shared", "pane_id": "pane-7"}
+        base.update(overrides)
+        return base
+
+    def test_same_pane_id_on_two_servers_is_not_a_conflict(self) -> None:
+        self.fixture.add_project("repo-a")
+        self.fixture.register(
+            "repo-a",
+            "impler-one",
+            session_id="sid-a",
+            pane_ref=self.pane(socket="socket-one"),
+        )
+        self.fixture.register(
+            "repo-a",
+            "impler-two",
+            session_id="sid-b",
+            pane_ref=self.pane(socket="socket-two"),
+        )
+        index = self.fixture.flush()
+
+        code, out = run_main("--global-index", str(index))
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("pane-ref-conflict", out)
+
+    def test_same_pane_id_on_one_server_is_still_a_conflict(self) -> None:
+        self.fixture.add_project("repo-a")
+        self.fixture.add_project("repo-b")
+        self.fixture.register(
+            "repo-a",
+            "impler-one",
+            session_id="sid-a",
+            pane_ref=self.pane(socket="socket-one"),
+        )
+        self.fixture.register(
+            "repo-b",
+            "impler-one",
+            session_id="sid-b",
+            pane_ref=self.pane(socket="socket-one"),
+        )
+        index = self.fixture.flush()
+
+        code, out = run_main("--global-index", str(index))
+        self.assertEqual(code, 1, out)
+        self.assertIn("pane-ref-conflict", out)
+        self.assertIn("socket=socket-one", out)
+
+    def test_absent_socket_and_the_explicit_default_name_collide(self) -> None:
+        # They address the same server, so enforcing uniqueness on the spelling
+        # instead of on the pane would miss a live mis-delivery risk.
+        self.fixture.add_project("repo-a")
+        self.fixture.add_project("repo-b")
+        self.fixture.register("repo-a", "impler-one", session_id="sid-a", pane_ref=self.pane())
+        self.fixture.register(
+            "repo-b",
+            "impler-one",
+            session_id="sid-b",
+            pane_ref=self.pane(socket=VALIDATOR.PANE_REF_DEFAULT_SOCKET),
+        )
+        index = self.fixture.flush()
+
+        code, out = run_main("--global-index", str(index))
+        self.assertEqual(code, 1, out)
+        self.assertIn("pane-ref-conflict", out)
+
+    def test_normalisation_is_lexical_and_treats_blanks_as_default(self) -> None:
+        default = VALIDATOR.PANE_REF_DEFAULT_SOCKET
+        self.assertEqual(default, VALIDATOR.normalize_pane_ref_socket(None))
+        self.assertEqual(default, VALIDATOR.normalize_pane_ref_socket(""))
+        self.assertEqual(default, VALIDATOR.normalize_pane_ref_socket("   "))
+        self.assertEqual(default, VALIDATOR.normalize_pane_ref_socket(default))
+        # A non-string is treated as absent rather than stringified: guessing a
+        # server is the one thing this dimension exists to stop.
+        self.assertEqual(default, VALIDATOR.normalize_pane_ref_socket(17))
+        self.assertEqual("socket-one", VALIDATOR.normalize_pane_ref_socket(" socket-one "))
+
+    def test_the_reading_shows_the_socket_as_written_and_normalised(self) -> None:
+        # A ruling is easier when "the writer said nothing" stays distinguishable
+        # from "the writer said default", even though the two compare equal.
+        self.fixture.add_project("repo-a")
+        self.fixture.add_project("repo-b")
+        self.fixture.register("repo-a", "impler-one", session_id="sid-a", pane_ref=self.pane())
+        self.fixture.register("repo-b", "impler-one", session_id="sid-b", pane_ref=self.pane())
+        index = self.fixture.flush()
+
+        code, out = run_main("--global-index", str(index))
+        self.assertEqual(code, 1, out)
+        self.assertIn("as written: absent", out)
+
+    def test_a_pane_ref_without_a_socket_still_keys_and_reports(self) -> None:
+        # Backward compatibility is load-bearing: every pane_ref written before
+        # this field existed must keep being checked exactly as before.
+        key = VALIDATOR.pane_ref_key(self.pane())
+        self.assertEqual(
+            ("mux", VALIDATOR.PANE_REF_DEFAULT_SOCKET, "shared", "pane-7"), key
+        )
+
+
 class HalfRegisteredTests(FixtureTestCase):
     def test_direction_a_summary_without_leaf(self) -> None:
         root = self.fixture.add_project("repo-a")
