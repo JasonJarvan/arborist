@@ -456,6 +456,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   has permanent work, and every finding it reports was avoidable.
 
 ### Fixed
+- **Two corrections to the ack module found while reviewing it, both silent-failure shaped** — (a) the
+  envelope header parser only handled the **multi-line** form, so an envelope flattened onto one line
+  produced **no ack at all**; since neither the composer's newline handling nor a brand's hook-payload
+  normalisation is under this repo's control, that failure was both reachable and silent — and silent means
+  *indistinguishable from "the target never submitted"*, the exact confusion this facility exists to remove.
+  Both forms now parse, the body is cut at its marker so prose containing `key=value` can never contribute a
+  header field, and all four shapes (flat, multi-line, flattened-without-nonce, bare mention in prose) are
+  pinned by tests. (b) The multiplexer session lifecycle prescription shipped one commit earlier named the
+  wrong mechanism: "destroy the session when no client is attached" is an **inference, not a cause** — it
+  only sees whether a client is attached *right now*, so it cannot tell "the human closed the window" from
+  "the human stepped away", and those two want opposite handling. Measured replacement, per case, in an
+  isolated test session: closing the outer tab delivers a **catchable `SIGHUP`** to the pane's foreground
+  process (verified end to end — inner session present before, gone after), detaching the *outer* session
+  sends no signal at all and both sessions survive, and detaching the *inner* session returns normally.
+  Trapping the close event is therefore both more precise and kinder: an inner detach becomes a legitimate
+  operation again instead of "press one key by mistake and kill a working agent". The section also records
+  *why* the wrong prescription was written: the two layers each have a "detach" and they were conflated, so
+  the guide now forbids the bare word — it must always say **outer** detach or **inner** detach. Recorded as
+  unverified: whether other multiplexer implementations also signal on pane close (it is observed behaviour,
+  not a standard requirement).
 - **The tiebreak shipped one commit earlier rested on a false premise: "cross-repo duplicate = stray
   registration, delete the wrong one"** (`agenttui-registry.md` §2.2.1, `validate_agenttui_registry.py`
   wording, +2 tests) — reading the leaves' actual contents (rather than judging from the finding alone)
