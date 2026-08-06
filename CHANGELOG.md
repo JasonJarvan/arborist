@@ -36,6 +36,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   deliberately, since syncing would hide the rot.
 
 ### Added
+- **A ruler for judging whether a rule is mechanised, and `scripts/probe.py` as the carrier for the two
+  products that failed it** (`verification-and-gates.md`) — the ruler: **a rule's degree of
+  mechanisation equals what omitting it costs you.** If omitting it means doing nothing, the rule is
+  zero-mechanised and restating it changes nothing; only when omitting it requires an explicit extra
+  action is it a gate. Applied immediately to the three products landed with the forensic-command rule,
+  it **failed two of them**: "the exit code must come from the command being diagnosed" costs nothing to
+  omit (`cmd | tail; echo $?` is the *easier* thing to type), and "prove the command before accepting a
+  first-run negative" was pure discipline. `probe.py` carries both: it keeps the two streams apart,
+  reports the rc of the command itself, and **refuses to hand back a negative reading on its own** — a
+  negative verdict requires either a control known to read positive (`--control-file`, argv one token
+  per line, never split out of a shell string) or an explicit `--accept-unverified-negative <reason>`
+  that is echoed into the result. Four outcomes get four **distinct** exit codes, including
+  `probe-suspect` for when the control also reads negative, because then **what is in question is the
+  probe rather than the subject** — and "the thing is absent" sharing a reading with "I cannot tell
+  whether it is absent" is the exact collapse the program exists to prevent. Its own tests caught a real
+  defect of this kind in it: an unreadable control file exited 1, the code meaning "negative,
+  corroborated", so an operator typo would have read as a confirmed finding.
+- **Assertion hit is not the same as the hit coming from the layer you meant** (`verification-and-gates.md`,
+  strengthening the end-to-end gate regression rule) — measured on a batch of new tests that assumed one
+  resolution order and got the opposite: two tests **passed, and the strings they asserted really did
+  appear**, but from an earlier layer, with the code under test never executed. Subtler than the rule's
+  two existing instances, which were "tested but did not reach the gate"; this is green, asserted, and
+  hit from elsewhere. When one string can be produced by several layers, the assertion must be anchored
+  to a layer — construct preconditions only the target layer can satisfy, or assert a marker only it
+  emits — otherwise it proves that *something somewhere* says that sentence.
+- **Schema clause: "nobody wrote it" and "somebody wrote it wrong" must be judged separately**
+  (`agenttui-registry.md` §2, general to every optional field rather than to one addition) — an absent
+  field reads as `unknown`, never as the most permissive value, and must not raise a failure, since
+  every pre-existing leaf lacks every later-added field and treating absence as a violation manufactures
+  a wall of false positives. A field present with an unrecognised value must be **refused and not
+  leniently normalised**, because lenient acceptance leaves the superseded shape sitting in the store,
+  which means the new semantics never landed. The distinction is whose fault it is: the first is the
+  ordinary cost of schema evolution, the second is a mistake somebody can go and fix.
+- **Retrospectively discovered protection must not be recorded as design intent**
+  (`verification-and-gates.md`) — measured: a named per-file staging habit adopted purely to keep commits
+  tidy independently blocked a hazard (committing someone else's unstaged deletions under your own name)
+  while its owner did not know the other layer had silently failed. Such protection cannot be found by
+  analysing design intent, only by retrospect; it belongs in the mitigation list because it works and
+  does not rely on remembering, but writing it up as "already considered by design" would leave the next
+  reader believing the hazard was defended against.
 - **A forensic command is itself fallible, and its failure arrives dressed as a normal reading**
   (`verification-and-gates.md`) plus the mechanical remedy for the delivery case (`--message-file` on
   `agenttui.py send`) — five measured instances in one night across two independent parties: positional

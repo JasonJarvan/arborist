@@ -167,6 +167,30 @@ class ThreeGeneralRulesLandedTest(unittest.TestCase):
             registry,
         )
 
+    def test_mechanisation_ruler_and_its_carrier_are_both_present(self) -> None:
+        text = self.read("spec/guides/verification-and-gates.md")
+        # 尺子本身。
+        self.assertIn("一条规则的机械化程度 = 省略它需要多做的动作", text)
+        # 它当场否掉了刚写下的两条产物 —— 删掉这张表就等于收回了尺子的证据。
+        self.assertIn("其中两条当场不合格", text)
+        # 载体必须真的存在,否则尺子量出的不合格没有下文。
+        self.assertIn("scripts/probe.py", text)
+        self.assertTrue((OVERLAY / "scripts" / "probe.py").exists())
+        # 四结局互不同码这一条是载体的核心。
+        self.assertIn("probe-suspect", text)
+        # 运气不得记成设计。
+        self.assertIn("不得记成设计意图", text)
+
+    def test_assertion_hit_must_be_anchored_to_a_layer(self) -> None:
+        text = self.read("spec/guides/verification-and-gates.md")
+        self.assertIn("断言命中 ≠ 命中来自你以为的那一层", text)
+        self.assertIn("断言必须**锚定到层**", text)
+
+    def test_schema_clause_separates_absent_from_invalid(self) -> None:
+        registry = self.read("spec/guides/agenttui-registry.md")
+        self.assertIn("「没人写过」与「有人写错了」必须分开判", registry)
+        self.assertIn("不得宽容地归一化", registry)
+
     def test_forensic_command_selfcheck_rule_keeps_its_meta_conclusion(self) -> None:
         text = self.read("spec/guides/verification-and-gates.md")
         self.assertIn("### 取证命令本身会出错，而它的错以正常读数的形式呈现", text)
