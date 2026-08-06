@@ -36,6 +36,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   deliberately, since syncing would hide the rot.
 
 ### Added
+- **Two guardrails on "enumeration is weaker than shape", and a shape-based root rule for the pane
+  self-identification gate** (`verification-and-gates.md`, `agenttui-registry.md` §5.0) — the guardrails
+  keep the criterion from being misapplied in opposite directions. **Enumeration is not "should not
+  exist", it is "should not bear load"**: an enumerated table has real value as a DIAGNOSTIC INDEX,
+  telling a reader where to look, and its content is usually bought with real incidents. The error is
+  using it as the decision basis, so the remedy is to demote it to an index and hand the decision to the
+  shape-based rule -- without saying this, the next person deletes the table and throws that experience
+  away. And **an exhaustive partition is not an enumeration**, even when it also looks like a list, with a
+  usable test: **when a new case turns up, does it fall into an existing cell or need a new one? The first
+  is a partition, the second an enumeration.** probe.py's four outcomes are a partition; the delivery
+  failure-shape table is an enumeration, having needed a new cell five times. Without this guardrail
+  "enumeration is weak" gets used to reject all classification work, including the parts that were
+  complete to begin with. Applied to the self-identification gate: its root rule is now shape-based --
+  **if the self-identification evidence is not enough to determine the pane UNIQUELY, refuse to write** --
+  which enumerates no conflict forms and demands only a proof of uniqueness, so a never-imagined conflict
+  form falls under the same rule instead of needing a new cell. The previously enumerated conditions are
+  demoted to a diagnostic index, with an explicit row stating that "not in the table" is not grounds to
+  proceed. Recorded as a **falsifiable prediction** rather than a fix: the enumerated form was predicted
+  to be bypassed eventually as a structural certainty, and both outcomes test the criterion -- if it is
+  bypassed the criterion scores, and if the shape-based backstop prevents any further bypass the criterion
+  also scores -- which is exactly why it was worth doing before the evidence arrived.
 - **A gate that has never refused anything is indistinguishable, in the readings, from a gate that does
   not exist** (`verification-and-gates.md`, executor `tests/test_gates_are_demonstrably_connected.py`) —
   the companion to the mechanisation ruler, and neither works alone: the ruler asks whether a rule can be
