@@ -67,6 +67,16 @@
 | **不可达**（half-registered，见 §4） | **响亮**：投递按规则 5/6 preflight 失败，报 `no-operational-route` 并非零退出 | 只影响这一次投递 |
 | **误投**（`pane-ref-conflict`：`pane_ref` 被多条**可达** leaf 声称 / 已腐烂） | **静默**：注入命令 rc=0（pane 不存在时 stdout 还完全为空，见 §3 规则 5），发送方读不出任何异常 | **污染第三方会话**——信封落进一个毫不相干的 ATUI 的 composer |
 
+**跨仓冲突的机械 tiebreak（规范性 · 因为这一类按构造就没有 owner）**：实测的 `pane-ref-conflict` **全部**发生在**两个不同项目仓之间**（A 仓的 leaf 与 B 仓的 leaf 声称同一个 pane），`duplicate-session-id` 同形。对这一类，「修复归各自 lane」**不成立**：**每个 lane 单看自己那条都是自洽的，冲突只在全局可见**——可预期的结果是两边都认为对方错、或两边互等，于是每条高危冲突各自卡住。故：
+
+| 条目 | 规则 |
+|---|---|
+| **判定输入优先级** | ① 该 pane 的**真实 cwd**（经该 pane 内进程的工作目录判定）> ② 两条 leaf 各自的 `session_file` 归属（会话文件按项目路径分目录，见 §2.2）> ③ `last_seen`。**高优先级读数存在时不得用低优先级读数翻案**；三级全取不到 ⇒ 不裁定，升给 human。 |
+| **判定必须在全局做** | 一次、看齐所有声称方后作出，**不得让两个 lane 各自判自己那条**（那正是上面互等的成因）。 |
+| **判定产物 = 一条具名裁定** | 必须写明：哪条**合法**、哪条**删**、以及**依据的原始读数**（不是「按惯例」「看起来像」）。裁定发给**被判错那条所属 lane** 执行删除——跨项目删别人仓里的 leaf 属于那个 lane 的处置权。 |
+| **validator 只读、不代替裁定** | validator **报告**冲突并**输出裁定所需的全部读数**（两条 leaf 的完整路径 + 各自 `session_id` / `session_file` / `state` / `last_seen` / `pane_ref`），使裁定者不必再手工回查；但它**不裁定、不删、无 `--fix`**。**报告 ≠ 交办**（同 §4 末「归属边界」）。 |
+| **真实 cwd 不自动取（须知，别当缺功能）** | 取它需要「pane → 进程」映射，而参考复用器里唯一能可靠报出 pane 存在性的命令**就是聚焦命令**（会把 human 的视图拽到该 pane），layout dump 又给不出 pane→pid ⇒ **没有只读替代**。按 [verification-and-gates「新增的观测动作必须先证明它不扰动被观测者」](./verification-and-gates.md#新增的观测动作必须先证明它不扰动被观测者)，会移动别人视图的观测**不是只读**，更不该藏在一个会被**批量**执行（GC 前后各一次）的 validator 里。⇒ validator 输出该读数为 **`unknown` 并写明为什么不能自动取**，由人工补齐。**机械证明**：该 validator **不执行任何外部命令**（有测试钉住），故加这些读数**没有**新增任何观测动作。 |
+
 ⇒ **误投比不可达严重，优先处置。** 理由是**谁承担代价、以及故障能不能被看见**：不可达当场就被 fail-closed 挡住、只有发送方受影响，代价有界且有人会看到；误投既不报错、又把代价转移给一个从未参与本次投递的第三方会话（它收到一段莫名指令，可能照做），且没有任何机械信号会让任何一方察觉。**一个能被看见的失败恒优于一个看不见的成功。**
 
 ### 2.3 全局 `index.json`（摘要级，gardener 维护）
@@ -76,6 +86,9 @@
 - **摘要与 leaf 的两份拷贝必须一致，且 leaf 为准**：`role` / `brand` / `state` / `lineage`（缺省 1）在两处同时存在，任一处漂移都会让跨项目读者按摘要作出错误路由（如按摘要的旧 `brand` 选 submit 键）。不一致时**以 leaf 为准**（§1「细节以各项目 `.arborist/agents/*` 为准」），修的是摘要。
 - **摘要与 leaf 的存在性也必须成对**：只有一边即 `half-registered`（两方向定义与修法见 §4）。
 - **`project_id` 是可机械重算的派生值，不是可手抄的字面值**：照 §2.1 的算法（`realpath` 归一化后 sha256 前 12 位）**重算比对**；手抄或从别的项目复制会让同一仓在跨表读者眼里裂成两条记录。
+  - **规则前移到写入时（这一条才是对因，读表侧校验只是兜底）**：`project_id` 在**自登记写入路径上由 `realpath` 计算**，**不接受手填字面值**（落点见 §5 第 4 点）；若目标位置已有值且与重算不符 ⇒ **fail closed**，不得覆盖也不得沿用。ADR-0007 amendment 已在**发送侧**写死同一条（按 realpath 重算、不符即拒），本条把它前移到**写入侧**——只在发送侧校验，等于允许错误先被写下来。
+  - **模板不得给可填空位**：`overlay/arborist-templates/` 里 `spec.json` 与 `index.json` 的 `project_id` 占位**明写「由 realpath 计算、不是填空位」并给出计算命令**（`validate_agenttui_registry.py --print-project-id <repo>`），而非一个形如 `<project-id>` 的空槽——**空槽本身就是手抄的邀请**。
+  - **这是「预防 > 检测 > 判断」的实例**：validator 能检测它（§4 检查 5），但只要写入路径还接受手写值，**它就永远有活干**——被检测出的每一条都是本可以不发生的。⇒ 判断（人去看哪个值对）最贵，检测次之，**让错值写不进去最便宜**。
 - 以上三条与 §2.2.1 两条唯一性同由 `validate_agenttui_registry.py` 检查（§4）。
 
 ### 2.4 role 枚举（语义对齐 [roles-and-tiering.md](./roles-and-tiering.md)）
@@ -360,11 +373,13 @@
   | 2 | `pane_ref` 三元组唯一，**只在有效态可达的 leaf 之间**，**独立于 1 查**；非可达却带 `pane_ref` 的另列为低危 warning、**不计入冲突**（pane 顺序复用是正常残留） | §2.2.1 | `pane-ref-conflict`（高危）/ `stale-addressing-handle`（warning）|
   | 3 | half-registered **方向 A**：index 有摘要、leaf 不存在 | §4 本节 | `half-registered` |
   | 4 | half-registered **方向 B**：leaf 存在、index 无摘要 | §4 本节 | `half-registered` |
-  | 5 | leaf 的 `spec.project.path` = 它实际所在的仓根，且 `project_id` 照 §2.1 算法**重算**相符 | §2.1 + §5 第 8 点 | `project-mismatch` / `project-id-mismatch` |
+  | 5 | leaf 的 `spec.project.path` = 它实际所在的仓根，且 `project_id` 照 §2.1 算法**重算**相符（**这是兜底**——对因是写入侧计算该值，见 §2.3 / §5 第 4 点）| §2.1 + §2.3 + §5 第 4/8 点 | `project-mismatch` / `project-id-mismatch` |
   | 6 | index 摘要与 leaf 的 `role`/`brand`/`state`/`lineage`（缺省 1）一致，**以 leaf 为准** | §1 + §2.3 | `index-leaf-disagreement` |
 
   - 调用：`python3 .trellis/scripts/validate_agenttui_registry.py [--global-index PATH] [--project PATH ...]`；不传 `--project` 时待查项目集来自全局 index 的 `projects[].path`。退出码 `0` 一致（warning 可存在）/ `1` 有不一致 / `2` 全局 index 缺失或非法 JSON（**fail-closed**——「读不到 index」不等于「没什么可查」）。低危 warning 印在**单独分节**、不影响退出码——把清理项与误投风险混印，等于让高危发现淹在低危里。
-  - **它是 validator，不是 fixer：刻意没有 `--fix`。** 修一条 leaf 往往要判「这个会话到底属于哪个项目」，且跨项目删别人的 leaf 属别的 lane 的处置权；工具只负责把冲突双方的**具体路径**指出来。它也**不联网、不读凭证、不启停会话**。
+  - **它是 validator，不是 fixer：刻意没有 `--fix`。** 修一条 leaf 往往要判「这个会话到底属于哪个项目」，且跨项目删别人的 leaf 属别的 lane 的处置权；工具只负责把冲突双方的**具体路径**指出来。它也**不联网、不读凭证、不启停会话、不执行任何外部命令**。
+  - **检查 1/2 的发现自带裁定所需读数**（因为这两类实测都跨仓、按构造没有 owner，规则见 §2.2.1「跨仓冲突的机械 tiebreak」）：每条发现后附**每个声称方**的完整路径 + `session_id` / `session_file` / `state` / `last_seen` / `pane_ref`，外加优先级最高的「该 pane 真实 cwd」一行——后者固定报 **`unknown` 并写明为什么不自动取**（取它只能用会抢焦点的聚焦命令，见 §2.2.1 末行；缺读数与「读到了没有」必须可区分，故不报空）。目的是让裁定能**只据报告**作出，而不是让 validator 代替裁定。
+  - **另一个「计算而非接受」的落点**：`--print-project-id <repo>` 打印按 `realpath` 重算的 `project_id`（§2.3 / §5 第 4 点），供自登记写入路径调用；给的路径不是已存在目录时 **exit 2 fail closed**——`realpath` 会把打错的路径同样消化成一个看上去很正常的 id，那正是本模式要消除的失败。它不读全局 index（写入发生在有表可查之前）。
   - 单个项目路径不存在（index 指向已删仓）→ 报出来但**继续查其余**，最后统一非零退出：一条坏数据不得挡住整表体检。
   - 检查 5 是「字段全对却落错位置」那类事故（§5 第 8 点）的**机械检测**——那次事故里注册表**字段自洽、看起来是好的**，错的只有落盘位置，恰是没人核对的那一项。
 - **rootorc / suborc / impler**：登记自身、读表知同伴、专注本职；**subimpler 不建条目**。
@@ -384,6 +399,9 @@
 2. 取 `session_id`：已 adopt Trellis + Arborist 的仓，Bash 环境直接读 `TRELLIS_CONTEXT_ID`（SessionStart hook 桥接注入，形如 `claude_<session-id>`，去前缀即得）；或从平台 hook stdin 载荷取 `session_id` / `transcript_path`。无桥接环境的兜底法（向会话输出一个随机 nonce，再到 brand 会话目录 grep 含该 nonce 的最新文件）**待实证**。**此处 nonce 是「自识别」用途**——定位**本会话自身**的 `session_id`/`session_file`；与 §3「投递契约」（[ADR-0007](./decisions/0007-agenttui-delivery-contract-pluggable-adapter.md)）里验证**对端送达**的 per-send nonce 是不同用途，勿混淆。
 3. 取 `session_file`：`transcript_path` 直接给出；否则按 brand 路径推导（见 §2.2）。
 4. `mkdir -p <repo>/.arborist/agents/<name>/`，写 spec.json + runtime.json（`brand` = actual runtime brand；`state: "active"`、`generation: 1`、`lineage: 1`（首任；经 Mode B 继承则见第 7 点）；字段示例见 `<repo>/.arborist/templates/`）。
+   - **`project.project_id` 必须**由 `project.path` 的 `realpath` **计算**，**不得手填、不得从别的 leaf 或别的项目复制**：`python3 .trellis/scripts/validate_agenttui_registry.py --print-project-id <repo>`（照 §2.1 算法，与 validator 检查 5 同一份实现，故不会有两套算法）。模板里该字段**不是空位**（见 §2.3）。
+   - **已有值与重算不符 ⇒ fail closed**：停下报错，不覆盖、不沿用——两者都会把一个已知错误的归属值继续传播（覆盖还会连带抹掉「这里曾经不一致」这个唯一线索）。
+   - 理由见 §2.3「预防 > 检测 > 判断」：写入路径只要还接受字面值，检测端就永远在清同一类错误。
 5. 同一 `name` 重启换新 session：更新 runtime.json（新 session_id / session_file，`generation` +1），spec.json 不动（`lineage` 是稳态身份，重启不变）。
 6. （可选）把自己追加进全局 `~/.arborist/index.json` 摘要（含 `lineage`）；不追加则留给 gardener 汇总。
 7. **经继承接管（sendbox Mode B）**：若本会话是经 inheritance-mode handoff 接管某角色（承担者换人、角色不变），spec.json 写 `lineage = 前任 lineage + 1`、`lineage_origin = 前任 session_id + 交接信名`（面包屑，非权威，见 §2.1）；`generation` 仍按本会话自身重启计（新会话即 1，与 lineage 无关）。

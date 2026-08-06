@@ -6,7 +6,7 @@
   "task": ".trellis/tasks/<mm-dd>-<task-slug>",
   "project": {
     "path": "<absolute-project-path>",
-    "project_id": "<project-id>"
+    "project_id": "<computed-from-realpath-not-a-fill-in-slot: python3 .trellis/scripts/validate_agenttui_registry.py --print-project-id <absolute-project-path>>"
   },
   "created": "<iso8601-created-at>",
   "lineage": 1
