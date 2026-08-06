@@ -181,6 +181,20 @@ class ThreeGeneralRulesLandedTest(unittest.TestCase):
         # 运气不得记成设计。
         self.assertIn("不得记成设计意图", text)
 
+    def test_ruler_has_the_negative_tier_and_the_outlet_criterion(self) -> None:
+        text = self.read("spec/guides/verification-and-gates.md")
+        # 第三档「负」及其不稳定性理由 —— 缺了它,②③ 会被读成同一档。
+        self.assertIn("**正确做法比错误做法更费事** ⇒ **负**", text)
+        self.assertIn("会被时间稳定地推向错误一侧", text)
+        # 错误出口不得复用结论出口 + 它的机械执行者必须同在。
+        self.assertIn("任何工具的错误出口都不得复用它的结论出口", text)
+        self.assertIn("tests/test_exit_outlet_discipline.py", text)
+        self.assertTrue((ROOT / "tests" / "test_exit_outlet_discipline.py").exists())
+        # 伪装清单跟着工具走,理由是形式。
+        self.assertIn("清单可以被逐条对照，正文只能被读到", text)
+        probe = (OVERLAY / "scripts" / "probe.py").read_text(encoding="utf-8")
+        self.assertIn("Known disguises", probe)
+
     def test_assertion_hit_must_be_anchored_to_a_layer(self) -> None:
         text = self.read("spec/guides/verification-and-gates.md")
         self.assertIn("断言命中 ≠ 命中来自你以为的那一层", text)

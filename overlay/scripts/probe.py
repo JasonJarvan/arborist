@@ -38,6 +38,23 @@ and so get accepted without a second look, while the competing explanation -- "m
 command did not test what I think it tested" -- carries no explanatory power at
 all and therefore never comes to mind.
 
+## Known disguises (check against this list, do not merely read it)
+
+Every instance so far had the same outer appearance: **the failure looked like a
+problem with the subject**. Three distinct mechanisms produce that appearance, and
+they are listed rather than described because a list can be gone through
+item-by-item while prose can only be read:
+
+| Disguise | The mechanism | What it looked like |
+|---|---|---|
+| **The command was written wrong** | arguments never split, the wrong path, an incomplete listing | "that commit does not exist" / "the directory is gone" |
+| **A stream was swallowed** | `>/dev/null 2>&1` on a diagnostic; `$?` taken after a pipe | "it ran every time" (the subcommand did not exist) / "rc=0, passed" (it refused) |
+| **The data was rewritten on its way to the parser** | a shell `echo` interpreting backslash escapes, so `\n` became a real newline | "the program emits invalid JSON" |
+
+The third is the reason this program prints to stdout and expects to be read by a
+parser reading the process's stdout directly. Do not route its output through a
+shell echo.
+
 ## Boundary discipline
 
 Control arguments are read from a **file, one argv token per line**, never split

@@ -88,15 +88,27 @@ def on_archive(task_json_path):
     print(f"[multica] WIMTB {key}: attachments verified={ok} (verify-before-rm 由清理步执行)")
 
 
+# 错误出口用具名常量,而不是 `sys.exit("<字符串>")`。字符串形态会**静默退出 1**,
+# 于是「调用方用错了」与这个脚本的其它不成功结局共用一个读数 —— 调用方无从区分。
+# 判据(实测于另一个脚本的一次自伤:一处路径笔误以「一条已佐证的否定发现」的形态返回):
+# **任何工具的错误出口都不得复用它的结论出口**,哪怕两者在数值上碰巧都表示不成功。
+EXIT_USAGE = 2
+
+
 def main():
     if len(sys.argv) < 2:
-        sys.exit("usage: trellis_multica_sync.py {on-start|on-archive} [TASK_JSON_PATH]")
+        print(
+            "usage: trellis_multica_sync.py {on-start|on-archive} [TASK_JSON_PATH]",
+            file=sys.stderr,
+        )
+        sys.exit(EXIT_USAGE)
     cmd = sys.argv[1]
     tj = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("TASK_JSON_PATH", "")
     try:
         {"on-start": on_start, "on-archive": on_archive}[cmd](tj)
     except KeyError:
-        sys.exit(f"unknown cmd {cmd}")
+        print(f"unknown cmd {cmd}", file=sys.stderr)
+        sys.exit(EXIT_USAGE)
     except Exception as e:
         _pending({"cmd": cmd, "task_json": tj, "error": str(e)})
         print(f"[multica] {cmd} failed (queued, non-blocking): {e}", file=sys.stderr)

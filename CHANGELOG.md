@@ -36,6 +36,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   deliberately, since syncing would hide the rot.
 
 ### Added
+- **The mechanisation ruler gains a third tier — negative — and the exit-outlet criterion it produced**
+  (`verification-and-gates.md`, enforced by `tests/test_exit_outlet_discipline.py`) — omitting a rule may
+  cost an explicit action (a **gate**), cost nothing (**zero**), or the correct way may be *more work than
+  the wrong way* (**negative**). Negative must be given a carrier first, because it is the unstable tier:
+  a zero-mechanised rule merely fails to fire, while a negative one is **pushed steadily toward the wrong
+  side by time** — every rushed moment moves one notch the wrong way, and that notch looks like saving
+  effort rather than like a violation. Re-graded "the exit code must come from the command being
+  diagnosed" from zero to negative on that basis, since `cmd | tail; echo $?` is the easier thing to
+  type. The hard criterion, from the one occasion in this repo where a gate caught its own author:
+  **a tool's error outlet may never reuse its conclusion outlet**, even when both numerically mean
+  unsuccessful — `probe.py` exited an unreadable control file through `SystemExit("<string>")`, which
+  silently exits 1, the code meaning "negative, corroborated", so an operator typo returned in the shape
+  of a confirmed finding. The executor guards each half of that failure: `EXIT_*` constants must be
+  pairwise distinct within a script (against a future author picking an already-taken value), and no
+  string-valued `sys.exit` / `SystemExit` is allowed (against the original cause — a string names no code,
+  so it becomes 1 whatever 1 already means). The second is the load-bearing one, because the first only
+  helps once the author has realised there is an outcome here at all, and that realisation is exactly
+  what was missing. It found two real violations in another shipped script on its first run.
+- **The list of disguises now travels with the tool rather than the prose** (`scripts/probe.py`) — command
+  written wrong / stream swallowed / data rewritten on its way to the parser, all three sharing one outer
+  appearance: **the failure looks like a problem with the subject**. Placed as a table in the tool's own
+  documentation on a point of form rather than content: **a list can be gone through item by item, prose
+  can only be read** — and these three are precisely what one should rule out before starting.
 - **A ruler for judging whether a rule is mechanised, and `scripts/probe.py` as the carrier for the two
   products that failed it** (`verification-and-gates.md`) — the ruler: **a rule's degree of
   mechanisation equals what omitting it costs you.** If omitting it means doing nothing, the rule is
