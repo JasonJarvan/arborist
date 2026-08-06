@@ -36,6 +36,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   deliberately, since syncing would hide the rot.
 
 ### Added
+- **A gate that has never refused anything is indistinguishable, in the readings, from a gate that does
+  not exist** (`verification-and-gates.md`, executor `tests/test_gates_are_demonstrably_connected.py`) —
+  the companion to the mechanisation ruler, and neither works alone: the ruler asks whether a rule can be
+  omitted, this asks whether a gate can be shown to be wired, and a gate can score high on the first
+  while not being connected at all. Requirement: **a gate must ship together with a construction that
+  makes it fire, not one added afterwards**, and the bookkeeping rule is that **zero hits may not be
+  recorded as "clean", only as "unanswered"** unless that construction exists. The weight of the rule is
+  in "not added afterwards", and it comes from a self-inflicted instance: a new guard shipped with zero
+  hits and its author read that as "the code is clean". It did carry a self-test and so passed — **but
+  that was added later, not thought of at the time**. The distinction: a later self-test proves the gate
+  is wired, it does not prove the author knew it was wired at the time; the first is a property of the
+  code, the second of the bookkeeping, and it is the second that was misread. Deliberately NOT phrased as
+  "must have fired in production", which would tempt someone into planting violations to earn a gate its
+  record. Also: **a gate's record must carry a timepoint** — "caught two on its first run" is a reading
+  from *then*, and after a refactor removes those two the sentence would let the next reader believe the
+  gate is still demonstrably connected.
+- **An enumerative check is structurally weaker than a shape-based one** (`verification-and-gates.md`) —
+  an enumerative check (list every known outcome, every known dangerous form) has **coverage equal to its
+  author's imagination**; a shape-based check (forbid a way of writing, require a property) does not
+  depend on it, so **when both exist the shape-based one is the load-bearing one**. Generalised from a
+  sharper observation: **a check that only works once you have already thought correctly cannot defend
+  against the not-thought-of class.** The instance sits inside a pair landed hours earlier — "EXIT_*
+  constants must be pairwise distinct" only helps once the author has realised there is an outcome here,
+  and the actual failure was not realising it; "no string-valued exit" needs no knowledge of which
+  outcomes exist. Classifies this repo's landed gates against the ruler, because writing the
+  classification down is what changes how the next gate gets written, and requires that a gate with only
+  an enumerative form must state in its gap list that **its coverage equals its author's imagination at
+  the time** rather than claiming coverage.
 - **The mechanisation ruler gains a third tier — negative — and the exit-outlet criterion it produced**
   (`verification-and-gates.md`, enforced by `tests/test_exit_outlet_discipline.py`) — omitting a rule may
   cost an explicit action (a **gate**), cost nothing (**zero**), or the correct way may be *more work than

@@ -181,6 +181,31 @@ class ThreeGeneralRulesLandedTest(unittest.TestCase):
         # 运气不得记成设计。
         self.assertIn("不得记成设计意图", text)
 
+    def test_gate_connectedness_rule_and_its_executor(self) -> None:
+        text = self.read("spec/guides/verification-and-gates.md")
+        self.assertIn("### 一道从未拒绝过任何东西的门，与不存在的门，在读数上不可区分", text)
+        # 「不得事后补」是全条的重量所在。
+        self.assertIn("不得事后补", text)
+        # 代码属性 vs 记账属性的区分 —— 删掉它,这条就退化成「加个测试」。
+        self.assertIn("前者是代码属性，后者是记账属性", text)
+        # 刻意不写成「必须开过火」的理由必须留着,否则有人会那样实现它。
+        self.assertIn("刻意不写成「必须开过火」", text)
+        # 战绩带时点。
+        self.assertIn("战绩必须带时点", text)
+        self.assertIn("tests/test_gates_are_demonstrably_connected.py", text)
+        self.assertTrue(
+            (ROOT / "tests" / "test_gates_are_demonstrably_connected.py").exists()
+        )
+
+    def test_shape_beats_enumeration_with_its_classification_table(self) -> None:
+        text = self.read("spec/guides/verification-and-gates.md")
+        self.assertIn("### 枚举式检查在结构上弱于形态式检查", text)
+        self.assertIn("覆盖面**等于作者的想象力**", text)
+        self.assertIn("形态式那条才是承重的", text)
+        # 分类表是这条的产物 —— 只有判据没有分类,下一次还是不会问自己属于哪类。
+        self.assertIn("先问它属于哪一类", text)
+        self.assertIn("本门的覆盖面等于作者当时的想象力", text)
+
     def test_ruler_has_the_negative_tier_and_the_outlet_criterion(self) -> None:
         text = self.read("spec/guides/verification-and-gates.md")
         # 第三档「负」及其不稳定性理由 —— 缺了它,②③ 会被读成同一档。
