@@ -364,6 +364,12 @@ class AgentRecord(NamedTuple):
     pane_ref: dict[str, str] | None
     spec_path: Path
     runtime_path: Path
+    # Role-inheritance generation, from spec.json. Absent reads as 1 (the first
+    # holder) per section 2.1 -- so a leaf written before this field existed keeps
+    # working. Defaulted here too, which keeps every existing construction site
+    # valid; the point of rolling it up is that a cross-project reader looking for
+    # "the current holder of this role" needs it in the summary, not just the leaf.
+    lineage: int = 1
 
 
 class Capability(NamedTuple):
@@ -640,6 +646,8 @@ def load_agent(repo: Path, name: str) -> AgentRecord:
                 socket, f"{runtime_path}: pane_ref.socket"
             )
 
+    raw_lineage = spec.get("lineage", 1)
+    lineage = raw_lineage if isinstance(raw_lineage, int) and raw_lineage >= 1 else 1
     return AgentRecord(
         name=name,
         brand=require_text(spec.get("brand"), f"{spec_path}: brand"),
@@ -659,6 +667,7 @@ def load_agent(repo: Path, name: str) -> AgentRecord:
         pane_ref=pane_ref,
         spec_path=spec_path,
         runtime_path=runtime_path,
+        lineage=lineage,
     )
 
 
@@ -1911,7 +1920,29 @@ def update_global_summary(
     agent: AgentRecord,
     *,
     state: str,
-) -> None:
+) -> str:
+    """Roll the leaf's summary up into the global index. Creates what is missing.
+
+    Returns what it did: "updated", "created-summary", or "created-project".
+
+    Why it creates rather than refuses: **a summary is derived from the leaf**, and
+    the leaf is authoritative (section 2.3), so generating one needs no information
+    the leaf does not already carry -- there is nothing to guess. Refusing instead
+    meant that a session which had just self-registered correctly could never
+    succeed at its first heartbeat: the leaf existed, the summary did not, and this
+    function raised on exactly that state. That is not a guard against a mistake;
+    it is a guard against the normal first-run path, i.e. it made the documented
+    "self-register, then heartbeat" sequence impossible to complete.
+
+    It also *is* the repair for one half of half-registered (direction B: leaf
+    present, summary absent) -- the guide asks for the two to exist pairwise, and
+    the only mechanism that can restore the pair is the writer of the leaf.
+
+    Creation is recorded, never silent: a created entry carries `created_by` so an
+    auditor can tell a rolled-up entry from one a human wrote. Silent creation
+    would make a mis-derived project id look like it had always been there, which
+    is the failure mode the path-derivation gate exists to prevent.
+    """
     index = read_json(index_path)
     projects = index.get("projects")
     if not isinstance(projects, list):
@@ -1922,10 +1953,21 @@ def update_global_summary(
         if isinstance(candidate, dict) and candidate.get("project_id") == agent.project_id:
             project_entry = candidate
             break
+
+    outcome = "updated"
     if project_entry is None:
-        raise RegistryError(
-            f"{index_path}: project {agent.project_id!r} is not registered"
-        )
+        # Every field is derived, none is guessed: the id is recomputed from the
+        # realpath by the same rule the validator uses, and the path is the one
+        # this leaf physically lives under.
+        project_entry = {
+            "project_id": agent.project_id,
+            "path": str(agent.project_path),
+            "name": agent.project_path.name,
+            "created_by": "agenttui-rollup",
+            "agents": [],
+        }
+        projects.append(project_entry)
+        outcome = "created-project"
 
     agents = project_entry.get("agents")
     if not isinstance(agents, list):
@@ -1936,8 +1978,21 @@ def update_global_summary(
             summary["state"] = state
             summary["session_id"] = agent.session_id
             atomic_write_json(index_path, index)
-            return
-    raise RegistryError(f"{index_path}: agent {agent.name!r} is not registered")
+            return outcome
+
+    agents.append(
+        {
+            "name": agent.name,
+            "role": agent.role,
+            "brand": agent.brand,
+            "state": state,
+            "session_id": agent.session_id,
+            "lineage": agent.lineage,
+            "created_by": "agenttui-rollup",
+        }
+    )
+    atomic_write_json(index_path, index)
+    return outcome if outcome == "created-project" else "created-summary"
 
 
 def write_runtime_state(
@@ -1948,7 +2003,8 @@ def write_runtime_state(
     now: str,
     global_index: Path | None,
     confirm_session_exit: bool = False,
-) -> None:
+) -> dict[str, str]:
+    """Write the leaf, then roll the summary up. Reports both halves separately."""
     if state not in {"active", "stopped"}:
         raise RegistryError(f"state must be active or stopped, got {state!r}")
     if state == "stopped" and not confirm_session_exit:
@@ -1962,8 +2018,61 @@ def write_runtime_state(
     runtime["state"] = state
     runtime["last_seen"] = now
     atomic_write_json(agent.runtime_path, runtime)
-    if global_index is not None:
-        update_global_summary(global_index, agent, state=state)
+    if global_index is None:
+        return {"leaf": "written", "summary": "not-requested"}
+
+    # Two files cannot be written atomically together -- there is no single
+    # os.replace that covers both. So this does NOT pretend to be atomic; it makes
+    # the outcome *readable*, which is where the actual harm was.
+    #
+    # The harm was never "not atomic": it was that a leaf had already been written
+    # and the caller was told `error`, with no way to tell "nothing happened" from
+    # "half of it happened". A caller that reads that as "nothing happened" then
+    # believes the heartbeat did not land, when it did.
+    #
+    # The leaf is written first on purpose: it is the authority (section 2.3), and
+    # a leaf without its summary is a *named, detectable* state (half-registered
+    # direction B) with a defined repair. The reverse -- a summary with no leaf --
+    # is direction A, which points at an agent that may not exist. Given that one
+    # of the two must land first, land the one whose failure mode is the diagnosable
+    # one.
+    #
+    # Which failures are left, and who repairs them -- because "report it and
+    # suggest a retry" would have been a *regression*: it replaces a loud error
+    # with a quiet half-success, and **a loud wrong reading gets chased down while
+    # a quiet half-success does not.**
+    #
+    # Once the roll-up creates what is missing, the "entry absent" class of failure
+    # no longer exists -- so a *self-healing* path is not needed for it; it simply
+    # cannot occur. What remains raises only on **structural damage** (the index's
+    # arrays are not arrays) or on I/O (unreadable, unwritable, invalid JSON). None
+    # of those improves by repeating the command. Telling the caller to retry would
+    # send it into a loop that can never succeed, which is worse than saying
+    # nothing.
+    #
+    # So the remaining failures are reported as **not self-repairing**, and pointed
+    # at the mechanism that actually finds them: the registry consistency validator
+    # reports leaf-without-summary as half-registered direction B, and it has an
+    # answer-moment (periodic maintenance, and before/after any bulk change). That
+    # is a real executor. "Someone will read stderr" is not -- a heartbeat is
+    # invoked automatically and nobody is watching its stderr.
+    try:
+        outcome = update_global_summary(global_index, agent, state=state)
+    except (RegistryError, OSError, json.JSONDecodeError) as exc:
+        return {
+            "leaf": "written",
+            "summary": "failed",
+            "summary_self_repairing": "no",
+            "detail": str(exc),
+            "recommended_action": (
+                "do NOT just retry -- what remains here is structural or I/O damage "
+                "to the global index and repeating the command cannot fix it. Repair "
+                "the index, then re-run. Until then this leaf reads as "
+                "half-registered direction B, which the registry consistency "
+                "validator reports"
+            ),
+        }
+    return {"leaf": "written", "summary": outcome}
 
 
 def current_session_id() -> str | None:
@@ -2727,7 +2836,7 @@ def command_send(args: argparse.Namespace, repo: Path) -> int:
 def command_state(args: argparse.Namespace, repo: Path, state: str) -> int:
     agent = load_agent(repo, args.name)
     require_current_session(agent, args.session_id)
-    write_runtime_state(
+    written = write_runtime_state(
         repo,
         args.name,
         state=state,
@@ -2737,10 +2846,34 @@ def command_state(args: argparse.Namespace, repo: Path, state: str) -> int:
     )
     print(
         json.dumps(
-            {"name": args.name, "state": state, "session_id": agent.session_id},
+            {
+                "name": args.name,
+                "state": state,
+                "session_id": agent.session_id,
+                # Both halves, always -- including on success, because "the leaf
+                # landed" and "the summary landed" are separate facts and a caller
+                # that cannot see them separately cannot act on a partial result.
+                **written,
+            },
             ensure_ascii=False,
         )
     )
+    if written.get("summary") == "failed":
+        # Non-zero, but a *different* non-zero meaning from "nothing happened":
+        # the payload says the leaf is already correct and the retry is safe.
+        print(
+            "warning: the leaf was written but the global summary roll-up failed. "
+            "The leaf is authoritative and already correct, so nothing was lost -- "
+            "but this is NOT self-repairing: the remaining failure classes are "
+            "structural or I/O damage to the global index, which a retry cannot "
+            "fix. Repair the index, then re-run. Meanwhile this leaf reads as "
+            "half-registered direction B and the registry consistency validator "
+            "will report it -- that validator, not this stderr line, is the "
+            "executor here (a heartbeat runs automatically and nobody watches its "
+            "stderr)",
+            file=sys.stderr,
+        )
+        return EXIT_UNCERTAIN_DELIVERY
     return 0
 
 

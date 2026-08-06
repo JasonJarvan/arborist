@@ -6,6 +6,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
 ## [Unreleased]
 
 ### Added
+- **Three criteria on the shape of a record, grouped under "the shape of a record decides whether the
+  judgement can be remade"** (`verification-and-gates.md`) — none of them says "write things down"; each names
+  a *dimension* whose absence makes a later re-judgement impossible. **(i) Loudness is not rhetoric**: turning
+  a loud error into a quiet half-success can be a regression even when the new reading is more accurate,
+  because the loud one gets chased and the quiet one does not — so any "make the report more precise" change
+  must ask whether it converted something chased into something ignored, and if so add a mechanism *with an
+  executor*. **(ii) A withdrawal must record which kind it was** — "the evidence refuted it" or "the cost was
+  accepted" — because the second is premise-dependent and re-opens by itself when the premise changes, while
+  writing only "withdrawn" destroys that reversibility. **(iii) A drift statement about a layered artifact
+  must name the layer**: when something has both a versioned product layer and a git-excluded runtime face,
+  "it is behind" collapses the two and readers hear the more severe one. Each carries the measured instance it
+  came from. The test for all three: **could someone reading only this record, a year later, remake the
+  judgement that was made at the time?** If not, a dimension is missing.
 - **Sender-side consumption of the submit ack — the one thing that stops an accepted message being sent
   twice** (`agenttui.py` `read_submit_ack` + `ACK_STATUS_*`, `agenttui-registry.md` §3, +5 tests) — the
   receiver-side ack shipped earlier had no consumer, so the guarantee existed only for a human reading the
@@ -576,6 +589,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   has permanent work, and every finding it reports was avoidable.
 
 ### Fixed
+- **A session that had just self-registered could never complete its first heartbeat** (`agenttui.py`
+  `update_global_summary` / `write_runtime_state`, `agenttui-registry.md` §5.6/§5.7, +8 tests) — the roll-up
+  refused when the agent summary or the project entry was absent, which is *exactly* the state a correct
+  self-registration leaves behind, so the documented "self-register, then heartbeat" sequence could not
+  complete. Worse, it refused **after** the leaf was already on disk, reporting `error` for a half-success
+  with no way for the caller to tell "nothing happened" from "half happened". The roll-up now **creates what
+  is missing**, on the grounds that a summary is *derived* from the leaf and the leaf is authoritative — so
+  generating one needs no information the leaf lacks and there is nothing to guess; it is also the only
+  mechanism that can restore the leaf/summary pair, i.e. it *is* the repair for half-registered direction B.
+  Created entries carry `created_by` so an auditor can distinguish a rolled-up entry from a hand-written one;
+  silent creation would let a mis-derived project id look like it had always been there. The guide's step 6
+  said appending to the global index was **optional** — that was wrong and directly contradicted the entry
+  injected into every session (which says to sync the summary); "optional" bought no freedom, only drift,
+  since it made an already-named inconsistent state into a legal choice.
+  On atomicity: two files cannot be written atomically together, so the fix does **not** pretend to be
+  atomic — it makes the outcome *readable*, which is where the harm actually was. Both halves are reported
+  separately, including on success. The leaf is written first deliberately: leaf-without-summary is a named,
+  detectable state with a defined repair, while summary-without-leaf points at an agent that may not exist —
+  given one must land first, land the one whose failure mode is diagnosable.
+  **And the first draft of that reporting was a regression, caught in review**: it advised a retry. Once the
+  create paths exist, the "entry absent" failure class cannot occur, so every *remaining* failure is
+  structural or I/O damage — which no retry improves. Advising one would loop a caller through something
+  that can never succeed, and it would trade a **loud error for a quiet half-success** — and a loud wrong
+  reading gets chased down while a quiet half-success does not. Remaining failures are therefore marked
+  not-self-repairing and pointed at the mechanism that actually finds them (the registry consistency
+  validator reports direction B and has answer-moments), with it stated explicitly that "someone will read
+  stderr" is **not** an executor, because a heartbeat runs automatically and nobody watches its stderr.
+  Also corrected while here: the guide's repair for direction A referenced a `register-self` subcommand that
+  **does not exist** in the shipped adapter — a repair pointing at a non-existent executor, which is itself
+  the "decoration" failure this repo names elsewhere.
 - **Shape 3 splits into 3a/3b — measurement overturned half of its attribution** (`agenttui-registry.md` §3)
   — two long-envelope deliveries to different targets produced an identical signature: text in the composer,
   composer not cleared, no credential error, nothing in the transcript. Under the old single row that reads as
