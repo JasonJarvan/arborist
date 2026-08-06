@@ -181,6 +181,25 @@ class ThreeGeneralRulesLandedTest(unittest.TestCase):
         # 运气不得记成设计。
         self.assertIn("不得记成设计意图", text)
 
+    def test_value_must_be_held_before_it_is_cited(self) -> None:
+        text = self.read("spec/guides/verification-and-gates.md")
+        self.assertIn("必须先做那个动作、再把真实值读出来填入", text)
+        # 重量在「为什么顺序约束优于自觉约束」这一句上。
+        self.assertIn("缺失是可见的", text)
+        self.assertIn("编造**不可见**", text)
+
+    def test_gate_connectedness_has_a_causal_second_layer(self) -> None:
+        text = self.read("spec/guides/verification-and-gates.md")
+        # 因果层的判据。
+        self.assertIn("把门拿掉，测试必须变红", text)
+        # 词形匹配只是必要条件 —— 缺这句会有人把第一层当充分条件。
+        self.assertIn("词形匹配只作必要条件，不得作充分条件", text)
+        # 明确劝退「读断言写法」那条歧路。
+        self.assertIn("把枚举从函数名搬到", text)
+        # 两道自抓的护栏。
+        self.assertIn("runner-fault", text)
+        self.assertIn("关于跑器的读数不得记进关于被测物的账", text)
+
     def test_enumeration_rule_carries_both_guardrails(self) -> None:
         text = self.read("spec/guides/verification-and-gates.md")
         # 护栏 1:枚举该降级为索引,不该被删 —— 缺了它有人会去删表。

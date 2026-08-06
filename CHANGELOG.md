@@ -36,6 +36,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   deliberately, since syncing would hide the rot.
 
 ### Added
+- **The gate-connectedness executor gains a causal second layer: remove the gate and the test must go
+  red** (`tests/test_gates_are_demonstrably_connected.py`) — the first layer matched test function names,
+  which is itself enumerative, and its halves fail in different directions: a non-matching name misreads
+  as "unanswered" (false positive, safe direction) while a name containing `reject` that only exercises
+  the happy path misreads as "answered" (false negative, unsafe). The fix is deliberately **not** to read
+  assertion styles, which would only move the enumeration from function names onto `assertRaises` /
+  non-zero codes / marker strings — another table waiting for its next uncovered cell. Instead the second
+  layer is causal, and it is **not a new invention but the literal executable form of the rule itself**:
+  if a gate that never refused anything is indistinguishable from no gate, then the only way to show the
+  two *are* distinguishable is to remove the gate and see whether the reading changes. It depends on no
+  naming convention, no assertion style, no author's habits. Mutation happens in a throwaway copy, never
+  the real tree. Two guardrails on it were both **caught by it rather than foreseen**: a control run
+  requiring the same candidates to be green in the *unmutated* sandbox (it caught candidates going red
+  from missing files, which had made the mutation test pass for the wrong reason), and a runner-fault
+  check, because `-k` selecting **zero** tests still exits 0 — so "did not go red" would read as "the gate
+  is not wired" when in truth nothing ran, and a reading about the runner may not be filed as a reading
+  about the subject. Also records a trap in the stub itself: `sys.exit(0)` at module level raises
+  `SystemExit(0)` through unittest's loader and makes the whole test process exit 0, rendering the
+  mutation invisible.
+- **A value must be held before it is cited — an ordering constraint, not a discipline**
+  (`verification-and-gates.md`) — measured: a letter *whose whole subject was the "landed needs a reading"
+  rule* cited a commit id that did not exist at the time, because the letter was written before the commit
+  and the slot needed a value. The rest of the text was entirely self-consistent, and what was fabricated
+  was precisely the class of **concrete values**, the same shape as sender-side corruption. Rule: when a
+  record cites a value produced by an action (commit id, test count, line number, hash), do the action
+  first and read the real value out. The weight is not the slip but why ordering beats intent: **reverse
+  the order and there is no value to read, so absence is visible — whereas fabrication is not.** It trades
+  an invisible failure mode for a visible one. By the mechanisation ruler, "be careful next time" sits in
+  the **negative** tier here, since writing first is the easier path and time therefore pushes steadily
+  toward fabrication.
 - **Two guardrails on "enumeration is weaker than shape", and a shape-based root rule for the pane
   self-identification gate** (`verification-and-gates.md`, `agenttui-registry.md` §5.0) — the guardrails
   keep the criterion from being misapplied in opposite directions. **Enumeration is not "should not
