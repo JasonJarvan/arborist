@@ -4,6 +4,7 @@
       "project_id": "<computed-from-realpath-not-a-fill-in-slot: python3 .trellis/scripts/validate_agenttui_registry.py --print-project-id <absolute-project-path>>",
       "path": "<absolute-project-path>",
       "name": "example-repo",
+      "alias": "example",
       "agents": [
         {
           "name": "example-impler",
