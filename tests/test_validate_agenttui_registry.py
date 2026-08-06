@@ -1070,5 +1070,50 @@ class MirrorRegistrationWordingTests(unittest.TestCase):
         self.assertIn("records about itself", module.TIEBREAK_PRIORITY)
 
 
+
+class ProjectAliasTests(unittest.TestCase):
+    """An alias is a convenience, and its domain is enforced at the source.
+
+    It gets interpolated into *external* namespaces -- a terminal multiplexer
+    session name, for one -- which commonly forbid dots, colons and spaces.
+    Constraining it here beats escaping it at every consumer, because that is
+    the kind of thing that gets missed in exactly one place. It is never an
+    identity: addressing and de-duplication go by the derived project id.
+    """
+
+    def test_a_valid_alias_passes(self) -> None:
+        module = load_validator_module()
+
+        self.assertIsNotNone(module.ALIAS_PATTERN.match("short-name"))
+        self.assertIsNotNone(module.ALIAS_PATTERN.match("a"))
+
+    def test_characters_that_break_external_namespaces_are_rejected(self) -> None:
+        module = load_validator_module()
+
+        for bad in ("Has.Dot", "has:colon", "has space", "UPPER", "-leading", ""):
+            self.assertIsNone(module.ALIAS_PATTERN.match(bad), bad)
+
+    def test_over_length_alias_is_rejected(self) -> None:
+        module = load_validator_module()
+
+        self.assertIsNone(module.ALIAS_PATTERN.match("a" * 33))
+
+    def test_absent_alias_is_not_a_finding(self) -> None:
+        # Convenience field: its absence must never fail anything, readers fall
+        # back to the project name.
+        module = load_validator_module()
+
+        self.assertIsNone(module.ALIAS_PATTERN.match("Bad.Alias"))
+        self.assertTrue(hasattr(module, "ALIAS_PATTERN"))
+
+    def test_nothing_keys_on_alias(self) -> None:
+        # Mechanical guard on the "alias is not identity" rule: no lookup,
+        # grouping or comparison may be built on it.
+        source = inspect.getsource(load_validator_module())
+
+        for forbidden in ('["alias"]', ".get(\'alias\')", "by_alias", "alias_index"):
+            self.assertNotIn(forbidden, source)
+
+
 if __name__ == "__main__":
     unittest.main()

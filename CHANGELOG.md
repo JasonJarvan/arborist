@@ -61,6 +61,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   target's reply appears) nor cleaned up while the runner is still writing; the path is reported instead.
 
 ### Added
+- **Optional project `alias`, with its domain enforced at the source** (`agenttui-registry.md` §2.3 + §5.0-b,
+  index template, validator check, +5 tests) — projects need a short name for places a full repository name
+  does not fit, the first of which is a terminal multiplexer session name. Three constraints are normative:
+  an alias is **never an identity** (addressing and de-duplication go by the derived project id, and a
+  mechanical test forbids any lookup, grouping or comparison keyed on the alias); its value domain is
+  restricted to `[a-z][a-z0-9-]{0,31}` **because it is interpolated into external namespaces** that commonly
+  forbid dots, colons and spaces — constraining it once at the source beats escaping it at every consumer,
+  which is the kind of thing that gets missed in exactly one place; and its absence must never fail anything
+  (readers fall back to the project name).
+- **Session naming *suggestion* for multiplexer-hosted ATUIs (explicitly not a requirement), plus the
+  lifecycle setting that must accompany it** (`agenttui-registry.md` §5.0-b) — the useful name is
+  `<project alias or name>-<task>-<role>`, taken **from the registry rather than the directory name** (a
+  directory can be renamed and several worktrees can point at one project, while the registry's project
+  identity is unique). But a launcher cannot know the task or the role at start time — those are settled
+  during self-registration, sometimes after a conversation. So the launcher starts with a predictable
+  `<project>-<pid>` and the ATUI **renames the session** once it registers. The section opens by stating
+  that it is advice whose only purpose is human findability: **an existing recognisable name is kept**, and
+  renaming for the sake of a uniform format is forbidden — the gain is tidiness, the cost is possibly rotting
+  an addressing handle, and that trade does not hold. It also records a measured default that sits on the
+  dangerous side: when the human closes the outer window, the default multiplexer behaviour **keeps the
+  session and its ATUI running** — worse than a stale handle, because it is an agent still working and still
+  spending quota while the human believes it was closed, and the registry cannot show that state either. The
+  destroy-on-last-client-detach option must be set explicitly, with two implementation notes: setting it on a
+  session created detached makes that session destroy itself immediately, and whether the detach key becomes
+  a hazard depends entirely on how the human actually closes things — ask first, then pick the mechanism. The section states the condition
+  under which that is safe at all: it works only where the pane handle is a globally unique, lifetime-stable
+  id, and is **unsafe** where the handle embeds the session name — there a rename silently rots every
+  existing handle, a failure class already measured in this repo. Which is also why evaluating a different
+  multiplexer means inspecting its handle shape, not just its injection command.
 - **Pane self-identification gate, restored from a downstream adopter's history where it had been lost**
   (`agenttui-registry.md` §5.0, gate-matrix row) — self-registration has to fill a pane handle, and the most
   natural way for a session to answer "which pane am I in" is to read the multiplexer's injected environment

@@ -91,6 +91,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
@@ -108,6 +109,16 @@ PROJECT_ID_LENGTH = 12
 # Fields the global summary duplicates from the leaf (check 6). `lineage`
 # carries the guide's documented default so a summary that omits it and a leaf
 # that omits it still compare equal.
+# A project's optional short name. Deliberately restricted, because it gets
+# interpolated into *external* namespaces (a terminal multiplexer session name,
+# for one) that commonly forbid dots, colons and spaces. Enforcing the domain at
+# the source beats escaping it at every consumer, which is the kind of thing that
+# gets missed in exactly one place.
+#
+# It is a convenience, never an identity: addressing and de-duplication go by
+# project_id (a derived value), so nothing may key on an alias.
+ALIAS_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+
 SUMMARY_FIELDS = ("role", "brand", "state", "lineage")
 LINEAGE_DEFAULT = 1
 
@@ -270,6 +281,22 @@ def collect_summaries(
                 )
             )
             continue
+        alias = project.get("alias")
+        if alias is not None and (
+            not isinstance(alias, str) or ALIAS_PATTERN.match(alias) is None
+        ):
+            findings.append(
+                Finding(
+                    "index-malformed",
+                    f"{index_path}: projects[{position}] has alias {alias!r}, which "
+                    "is outside the permitted domain [a-z][a-z0-9-]{0,31}. An alias "
+                    "is interpolated into external namespaces (a multiplexer session "
+                    "name, for one) that forbid dots, colons and spaces, so the "
+                    "domain is enforced here rather than escaped at each consumer. "
+                    "Note this is a convenience field: drop it and readers fall back "
+                    "to 'name'; nothing addresses or de-duplicates by it.",
+                )
+            )
         project_root = Path(path_value).expanduser()
         if str(project_root) not in seen_roots:
             seen_roots.add(str(project_root))
