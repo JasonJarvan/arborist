@@ -162,6 +162,14 @@ EXIT_PRE_INJECTION_REJECTED = 4
 INTRUSION_FOCUS_MOVED = "focus-moved"
 INTRUSION_NONE = "already-focused"
 INTRUSION_UNKNOWN = "unknown"
+# A transport whose existence probe is *not* a focus command cannot have disturbed
+# anyone, and that is a different fact from "the target happened to be focused
+# already". Recording both as INTRUSION_NONE would merge a structural property
+# with a lucky reading, and the analysis question ("would migrating remove the
+# focus cost") is exactly the difference between them. Measured on a detached
+# server, so it is a claim about the multiplexer's own state layer; whether an
+# *attached* client stays put is still unverified (see TmuxTransport.exists).
+INTRUSION_NO_FOCUS_COMMAND = "no-focus-command-issued"
 
 # Focus-intrusion observations are appended here, one JSON object per pane
 # delivery. Global rather than per-project on purpose: panes belong to the
@@ -917,10 +925,357 @@ class ZellijTransport(PaneTransport):
         )
 
 
-# Single place where a multiplexer name maps to a transport. Adding one is a new
-# entry here plus a PaneTransport subclass; no routing code changes.
+# --- Concrete transport: tmux -------------------------------------------------
+# The second pane transport, deliberately *coexisting* with the one above rather
+# than replacing it: both stay registered, so an existing pane_ref keeps working
+# while panes migrate one at a time. Everything tmux-specific is confined below
+# this line plus the TRANSPORTS entry; the delivery contract and the routing layer
+# are untouched (ADR-0007 transport neutrality).
+
+# Observed failure texts (tmux 3.4, measured on a private detached socket so that
+# no human's terminal was touched). This transport does exit non-zero for a
+# missing target, but the verdict is still taken from the *joined* streams: the
+# same discipline holds for every transport, and one of tmux's own commands
+# answers rc=0 for a target that does not exist (see TmuxTransport.exists).
+TMUX_NOT_FOUND_PATTERNS = (
+    re.compile(r"can't find pane\b", re.IGNORECASE),
+    re.compile(r"can't find window\b", re.IGNORECASE),
+    re.compile(r"can't find session\b", re.IGNORECASE),
+    re.compile(r"no server running on\b", re.IGNORECASE),
+    re.compile(r"error connecting to\b", re.IGNORECASE),
+)
+
+# Session name plus pane id per listed pane. Not an f-string anywhere: the braces
+# are tmux's own format syntax.
+TMUX_PANE_LISTING_FORMAT = "#{session_name}\t#{pane_id}"
+
+
+class TmuxTransport(PaneTransport):
+    """tmux implementation of the pane transport capabilities.
+
+    Measured differences from the focus-addressed transport above, each of which
+    shows up as a design decision in this class:
+
+    1. ``send-keys -t <pane>`` is genuinely directed: it reaches a pane in a
+       *different* window with no selection side effect at all (measured: the
+       session's active window and every pane's ``pane_active`` flag were
+       identical before and after, and no other pane received a byte). So the
+       existence probe here does **not** have to be a focus command, which is
+       this transport's substantive advantage over one that addresses panes
+       through focus.
+    2. The probe is therefore ``list-panes -t`` (``capture-pane -t`` would do as
+       well): both answer rc=1 and ``can't find pane:`` for a missing target.
+    3. ``display-message -p -t <missing>`` is **forbidden as an existence
+       criterion**: measured rc=0 while silently falling back to the *current*
+       pane's attributes. It is the same shape of trap as the other transport's
+       screen-dump probe — the command that looks like the natural "just read
+       this pane's properties" is exactly the one that lies. It is used below in
+       one place only, without ``-t``, as a self-query.
+    4. Addressing anchors on the pane id (``%N``), which tmux documents as
+       unchanged for the life of the pane. A window rename, a pane renumber or
+       ``base-index``/``pane-base-index`` offsets therefore cannot rot the
+       address — unlike a handle whose addressing depends on a session *name*
+       captured at launch time, which rots silently on rename. The session name
+       is still carried in the pane_ref and is cross-checked below, so a rename
+       surfaces as a loud refusal ("rebuild the pane_ref") rather than as a
+       silent write into nowhere. That is a smaller rot surface, not none.
+    5. A target's own pane is self-reported through ``TMUX_PANE``, so a pane_ref
+       can be registered from authoritative self-knowledge instead of guessed by
+       matching cwd and command.
+
+    Known limits, stated rather than implied. The measurements above were taken
+    on a server with no client attached, so they are readings of the
+    multiplexer's state layer; whether a *watching* human is left undisturbed is
+    not verified here. And a pane id is unique only within one tmux server, while
+    ``pane_ref`` carries no socket field — see the contract-gap list in
+    agenttui-registry.md §3.
+    """
+
+    name = "tmux"
+    executable = "tmux"
+
+    def __init__(
+        self,
+        *,
+        runner: CommandRunner = run_command,
+        which: Callable[[str], str | None] = shutil.which,
+    ) -> None:
+        self._runner = runner
+        self._which = which
+        self._last_intrusion: str | None = None
+        self._last_observation: dict[str, Any] = {}
+
+    def available(self) -> Capability:
+        located = self._which(self.executable)
+        if located is None:
+            return Capability(
+                False, f"pane transport CLI {self.executable!r} is not installed"
+            )
+        return Capability(True, f"{self.executable} found at {located}")
+
+    def probe_argv(self, pane_ref: dict[str, str]) -> list[str]:
+        """Read-only existence probe: errors loudly for a missing pane.
+
+        Deliberately not ``display-message -p -t``, which answers rc=0 and the
+        current pane's attributes for a target that does not exist.
+        """
+        return [
+            self.executable,
+            "list-panes",
+            "-t",
+            pane_ref["pane_id"],
+            "-F",
+            TMUX_PANE_LISTING_FORMAT,
+        ]
+
+    def write_chars_argv(
+        self,
+        pane_ref: dict[str, str],
+        text: str,
+        *,
+        paste_framed: bool = False,
+    ) -> list[str]:
+        # ``-l`` sends the argument literally, as a byte stream into the pane's
+        # pty, so the base class's terminal-standard bracketed-paste markers are
+        # exactly right and no override is needed. tmux does have a native paste
+        # primitive (``load-buffer`` + ``paste-buffer -p``), and it is measured to
+        # work, but it costs a second command and a *shared, named buffer* —
+        # extra cross-delivery state, plus a different command sequence for
+        # everyone. Whether framing happens at all stays the caller's brand-keyed
+        # decision (PASTE_FRAMED_BRANDS), identical to the other transport.
+        payload = self.frame_paste(text) if paste_framed else text
+        return [self.executable, "send-keys", "-t", pane_ref["pane_id"], "-l", payload]
+
+    def send_key_argv(self, pane_ref: dict[str, str], key_byte: str) -> list[str]:
+        # ``-H <hex>`` sends that literal byte, which is what the submit-key
+        # contract names (Enter = 13, Codex's queue key = 9). A key *name*
+        # (``send-keys Enter``) would go through tmux's key encoding instead,
+        # and this machine's tmux configuration can enable extended keys, which
+        # may change what Enter looks like on the wire.
+        return [
+            self.executable,
+            "send-keys",
+            "-t",
+            pane_ref["pane_id"],
+            "-H",
+            self._hex_byte(key_byte),
+        ]
+
+    @staticmethod
+    def _hex_byte(key_byte: str) -> str:
+        try:
+            value = int(key_byte)
+        except ValueError as exc:
+            raise RegistryError(
+                f"submit key must be a decimal byte value, got {key_byte!r}"
+            ) from exc
+        if not 0 <= value <= 255:
+            raise RegistryError(f"submit key byte out of range: {key_byte!r}")
+        return format(value, "02x")
+
+    def _run(
+        self,
+        argv: list[str],
+        *,
+        cwd: Path | None,
+        timeout: float | None,
+    ) -> CommandOutcome:
+        try:
+            completed = self._runner(argv, cwd=cwd, timeout=timeout)
+        except OSError as exc:
+            return CommandOutcome(
+                argv=argv,
+                returncode=127,
+                stdout="",
+                stderr=str(exc),
+                rejected=True,
+                detail=f"could not execute {argv[0]!r}: {exc}",
+            )
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
+        # Same rule as every other transport: judged by the two streams joined.
+        # This one's exit status happens to be more trustworthy -- a missing pane
+        # is rc=1 with a diagnostic, including for the injection command itself --
+        # but the code is still not the criterion, because ``display-message -t``
+        # answers rc=0 for a missing target. Trusting rc where it works and text
+        # where it does not would give two rules to remember and one of them
+        # silently wrong.
+        text = f"{stdout}\n{stderr}"
+        for pattern in TMUX_NOT_FOUND_PATTERNS:
+            match = pattern.search(text)
+            if match is not None:
+                return CommandOutcome(
+                    argv=argv,
+                    returncode=completed.returncode,
+                    stdout=stdout,
+                    stderr=stderr,
+                    rejected=True,
+                    detail=(
+                        f"{self.name} reported {match.group(0)!r} "
+                        f"(exit status {completed.returncode}; the text is the "
+                        "criterion, not the code)"
+                    ),
+                )
+        return CommandOutcome(
+            argv=argv,
+            returncode=completed.returncode,
+            stdout=stdout,
+            stderr=stderr,
+            rejected=False,
+            detail=(
+                f"{self.name} reported no addressing error "
+                "(silence is not delivery evidence)"
+            ),
+        )
+
+    def exists(self, pane_ref: dict[str, str]) -> Capability:
+        """Existence preflight via ``list-panes -t`` — judged by joined output.
+
+        No focus is taken and no key is sent: unlike a focus-addressed transport,
+        this probe is read-only, which is why nothing here has to warn about
+        stealing a human's view. The honest boundary: that was measured on a
+        server with **no client attached**, so it is a reading of the
+        multiplexer's state layer, not proof that a watching human is undisturbed.
+
+        Three refusals, all fail-closed:
+
+        * the probe reported a not-found text (the pane, window, session or the
+          server itself is gone);
+        * the probe answered but the addressed pane id is not among the panes it
+          listed — silence about the target is not evidence of the target;
+        * the listed session name differs from ``pane_ref.session``. Addressing
+          would still have worked (the pane id is server-unique), but a pane_ref
+          whose fields disagree with reality has rotted, and delivering anyway is
+          how an envelope lands in a stranger's composer. A whole new pane_ref is
+          the remedy; patching one field is not.
+        """
+        observing = self.observe_addressing
+        outcome = self._run(self.probe_argv(pane_ref), cwd=None, timeout=None)
+        listed_session = self._listed_session(outcome.stdout, pane_ref["pane_id"])
+        own_session = self._own_session() if observing else None
+        # Not INTRUSION_NONE: that value means "the target happened to be focused
+        # already", a reading this probe never takes. Recording it here would let
+        # a structural property masquerade as a lucky one in the same denominator.
+        self._last_intrusion = None if outcome.rejected else INTRUSION_NO_FOCUS_COMMAND
+        self._last_observation = {
+            # Kept as explicit unknowns rather than omitted: an absent field reads
+            # as "nothing happened", and this transport genuinely did not read the
+            # attached client's view. It cannot switch a window either -- but that
+            # is unverified under an attached client, so it is not claimed here.
+            "active_tab_before": None,
+            "active_tab_after": None,
+            "tab_switched": None,
+            "same_multiplexer_session": (
+                None
+                if own_session is None or listed_session is None
+                else own_session == listed_session
+            ),
+            "probe_is_focus_command": False,
+            "observed_pane_session": listed_session,
+        }
+        if outcome.rejected:
+            return Capability(
+                False,
+                f"pane {pane_ref['pane_id']!r} in session "
+                f"{pane_ref['session']!r} is not reachable: {outcome.detail}",
+            )
+        if listed_session is None:
+            return Capability(
+                False,
+                f"pane {pane_ref['pane_id']!r} was not among the panes the "
+                "existence probe listed, and an answer that does not mention the "
+                "target is not evidence of the target",
+            )
+        if listed_session != pane_ref["session"]:
+            return Capability(
+                False,
+                f"pane {pane_ref['pane_id']!r} exists but reports session "
+                f"{listed_session!r}, not the registered {pane_ref['session']!r}; "
+                "this pane_ref has rotted and must be rebuilt in full, not "
+                "patched field by field",
+            )
+        return Capability(
+            True,
+            f"pane {pane_ref['pane_id']!r} in session {pane_ref['session']!r} "
+            "answered the read-only existence probe (no focus was taken, so "
+            "nobody's view was disturbed)",
+        )
+
+    @staticmethod
+    def _listed_session(stdout: str, pane_id: str) -> str | None:
+        """Session name reported for ``pane_id``, or None if it was not listed."""
+        for line in stdout.splitlines():
+            session, separator, listed_pane = line.partition("\t")
+            if separator and listed_pane.strip() == pane_id:
+                return session
+        return None
+
+    def _own_session(self) -> str | None:
+        """Which session this process itself sits in, or None if unknown.
+
+        The one legitimate use of ``display-message -p``: with no ``-t`` it is a
+        *self*-query, so the "silently falls back to the current pane" behaviour
+        that disqualifies it as an existence probe is precisely what is wanted.
+        Read-only, best-effort and measurement-only: any problem yields None,
+        which analysis reads as "unknown" rather than "not the same session".
+        """
+        if not os.environ.get("TMUX_PANE"):
+            return None
+        try:
+            outcome = self._run(
+                [self.executable, "display-message", "-p", "#{session_name}"],
+                cwd=None,
+                timeout=None,
+            )
+        except Exception:  # measurement must not break delivery
+            return None
+        if outcome.rejected or outcome.returncode != 0:
+            return None
+        return outcome.stdout.strip() or None
+
+    def addressing_intrusion(self) -> str | None:
+        return self._last_intrusion
+
+    def addressing_observation(self) -> dict[str, Any]:
+        return dict(self._last_observation)
+
+    def write_chars(
+        self,
+        pane_ref: dict[str, str],
+        text: str,
+        *,
+        paste_framed: bool = False,
+        cwd: Path | None = None,
+        timeout: float | None = None,
+    ) -> CommandOutcome:
+        return self._run(
+            self.write_chars_argv(pane_ref, text, paste_framed=paste_framed),
+            cwd=cwd,
+            timeout=timeout,
+        )
+
+    def send_key(
+        self,
+        pane_ref: dict[str, str],
+        key_byte: str,
+        *,
+        cwd: Path | None = None,
+        timeout: float | None = None,
+    ) -> CommandOutcome:
+        return self._run(
+            self.send_key_argv(pane_ref, key_byte), cwd=cwd, timeout=timeout
+        )
+
+
+# Single place where a multiplexer name maps to a transport, and the authoritative
+# value domain of ``pane_ref.multiplexer``. Adding one is a new entry here plus a
+# PaneTransport subclass; no routing code changes. Two transports coexist on
+# purpose: migration is per pane, not a flag day. Moving a pane between them means
+# rebuilding its whole pane_ref -- editing only ``multiplexer`` leaves an address
+# from the old multiplexer under the new one's name.
 TRANSPORTS: dict[str, Callable[[], PaneTransport]] = {
     ZellijTransport.name: ZellijTransport,
+    TmuxTransport.name: TmuxTransport,
 }
 
 

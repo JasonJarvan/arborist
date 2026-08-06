@@ -44,14 +44,14 @@
 | `state` | **声明态**：`active` / `stopped`（`idle` 为保留枚举值，MVP 不自写，见 §3）。`stopped` 有**写入门槛**（仅会话真正结束才写，见 §3/§4）且遇活转录矛盾会被派生规则**降级为 contradiction**——声明态非确知，读者据 §3 现算，不无条件采信 `stopped` |
 | `last_seen` | 心跳时间戳（ISO8601，可信触点顺带刷新）。**写 `stopped` 时也须记 `last_seen`**——它是活转录矛盾检测的基准：若 `session_file` mtime 晚于该 `stopped` 写入记录的 `last_seen`（容小段文件系统时钟偏移），即声明与派生活性证据矛盾（见 §3） |
 | `generation` | 重启代数（同一 `name` 重启/换 session 时 +1） |
-| `pane_ref` | 可选：**投递 adapter 用的** 终端复用器 pane/tab 引用。core 不强制（未启用活 pane 投递时置 `null`）；启用活 pane 投递 adapter 时按 [ADR-0007](./decisions/0007-agenttui-delivery-contract-pluggable-adapter.md) 契约填，供 adapter 寻址目标 pane。**它是启动时快照、会腐烂**：复用器 session 改名或换复用器后，整条 `pane_ref` 必须**重建**（不能只改 `multiplexer` 字段），否则注入会静默投空——见 §3 投递契约规则 5。注意：送达证据（transcript 字节边界 / per-send nonce / marker）是 **per-send 运行时态，不入本静态表**，故此表**不**新增存 nonce/证据的字段 |
+| `pane_ref` | 可选：**投递 adapter 用的** 终端复用器 pane/tab 引用。core 不强制（未启用活 pane 投递时置 `null`）；启用活 pane 投递 adapter 时按 [ADR-0007](./decisions/0007-agenttui-delivery-contract-pluggable-adapter.md) 契约填，供 adapter 寻址目标 pane。**`multiplexer` 值域 = 随发 adapter 的 transport 注册表键，当前两个并存：`zellij` / `tmux`**（并存是刻意的——迁移按 pane 逐个进行，不做 flag day；值域权威在代码那张注册表，规范这一行与它同步）。**它是启动时快照、会腐烂**：复用器 session 改名或换复用器后，整条 `pane_ref` 必须**重建**（**不能只改 `multiplexer` 字段**——只改这一个字段等于把旧复用器的地址挂在新复用器名下，两套寻址语义不同，得到的是一个语法合法、语义错位的句柄），否则注入会静默投空——见 §3 投递契约规则 5。注意：送达证据（transcript 字节边界 / per-send nonce / marker）是 **per-send 运行时态，不入本静态表**，故此表**不**新增存 nonce/证据的字段 |
 
 #### 2.2.1 唯一性约束（规范性 · 机械执行者见 §4）
 
 注册表无守候进程、每个写入者各写自己那条 leaf，故下列两条唯一性**结构上可能被违反**，且**必须由 validator 机械检查**（`validate_agenttui_registry.py`，见 §4）——只写在这里而无执行者，按 [verification-and-gates「没有执行者的门是装饰」](./verification-and-gates.md#门有执行者吗通则没有机械产物的规则是装饰) 就是装饰。
 
 - **`session_id` 全局唯一 —— 一个会话属于一个项目。** 同一 `session_id` 不得出现在**多个项目**的 leaf 里（也不得在同一项目里被两条 leaf 声称）。真归属可由该 leaf 的 `session_file` 路径、或该 pane 的实际 cwd 判定；不属于本项目的那条应删。**这条是根约束、不受有效态限定**——重复登记无论 `state` 写什么都是错登记。
-- **`pane_ref` 唯一性 —— 一个 pane 一个「活」agent**，键是 `(multiplexer, session, pane_id)` **三元组**（同一 `pane_id` 落在两个复用器 session 下不算撞）。它形式上是上一条的推论，**但必须独立检查**：两个**不同** session 声称同一 pane 说明至少一条 `pane_ref` 已腐烂（见上表 `pane_ref` 行「启动时快照、会腐烂」），而 `session_id` 唯一性检查看不见这一格。
+- **`pane_ref` 唯一性 —— 一个 pane 一个「活」agent**，键是 `(multiplexer, session, pane_id)` **三元组**（同一 `pane_id` 落在两个复用器 session 下不算撞）。**⚠️ 该三元组对 `multiplexer=tmux` 不足以唯一定位一个 pane**：tmux 的 pane id 只在**单个 tmux server（socket）内**唯一，而本三元组无 socket 维度 ⇒ 同机多 server 时，两个**不同**的真实 pane 可以撞成同一个键（validator 报假冲突），两条**真该撞**的也可能被判为不撞。这是**已记录的 schema 缺口**（修法与当前处置见 §3「随发 adapter 的契约缺口」那条 socket 项），不是本节判据的错。它形式上是上一条的推论，**但必须独立检查**：两个**不同** session 声称同一 pane 说明至少一条 `pane_ref` 已腐烂（见上表 `pane_ref` 行「启动时快照、会腐烂」），而 `session_id` 唯一性检查看不见这一格。
   - **⚠️ 唯一性只在「有效态可达」的 leaf 之间强制**（`active` / 保留值 `idle`；`state` 缺失或未知值按可达处理——猜「大概死了」会把高危发现压掉）。**理由：pane 会被顺序复用**——一个 session 结束、下一个在同一 pane 里起来，旧 leaf 若还留着非空 `pane_ref`，这是**完全正常**的残留，不是冲突。按朴素「三元全局唯一」实现会把它报成冲突，而**假阳性多的 validator 会被人忽略，那比没有更糟**。
   - **故拆成两条独立发现，不得折进一条**（两者处置完全相反：一个要当场停下来修，一个批量清扫；混在一起高危会淹在低危里）：
 
@@ -207,6 +207,8 @@
 5. **pane 存在性 preflight 必须选「对不存在的 pane 会明确报错」的探针，且按 **stdout 与 stderr 合并文本**判定**（诊断文本可能只出现在 stderr——zellij 实测即如此；transport 中立表述；zellij 侧的具体裁定见下「参考 adapter」段）：**禁用**「对不存在的 pane 静默返回空」的读屏类命令作存在性判据（会得**假阳性**：把不存在的 pane 认作存在）；且**不得把退出码当作成功依据**——复用器可能对「pane 不存在」也返回 rc=0（zellij 六格实测里四格如此）。反向也不成立：探针对不存在的 pane 可能返回非零，但**不得**据此把非零当拒绝依据，见下「参考 adapter」段那条未解决矛盾。存在性 preflight 只解决**寻址**，本身**不是**送达证据（规则 3 不变）。
    - **「按合并文本判定、不靠 rc」不只适用于探针，也适用于注入与提交命令本身**：复用器对「目标 session 名不存在」也可能 **rc=0，而说明只出现在 stderr（stdout 里甚至装的是正常内容，如 session 列表）**（实测文本见下「参考 adapter」段的 zellij 裁定）。⇒ 调用方若按 `$?` 判成功，会把「整条命令打进虚空」读成「已发出」。
    - **最坏情形：连 stdout 判定都救不了** —— **session 存在、但 pane 不存在**时，注入命令可能 **rc=0 且 stdout 与 stderr 两条流全空**（zellij 实测，见下）。这一格没有任何事后文本可依据。⇒ **本规则的存在性 preflight 不是优化，而是唯一能在注入前发现该情形的手段**（会报错的探针至少会打印 not found）；一旦注入已经发出，唯一判据只剩规则 3 的**送达证据（nonce）**。
+     - **该最坏格是 per-复用器的，不是通则 —— 在 tmux 上它不存在（实测）**：同样处境（pane 不存在）下 tmux 的注入命令自身 **rc=1 + `can't find pane:` 文本**，事后有文本可判。⇒ 对 tmux 而言，上一条「preflight 是唯一事前手段」的**理由**不成立，事前 preflight 的效力**从**「唯一能发现该情形的手段」**降为**「省一次无效注入的优化」：即规则 5 的事前 preflight 在 tmux 上从**必需**降为**优化**。
+     - **⚠️ 但降级只写进规范、不得写进代码**（两条理由，缺一条这个降级就会变成一个 bug）：① 契约是 **transport 中立**的，「先验存在性再注入」这一形状对所有 transport 一致，按复用器开关 preflight 等于把复用器名重新硬编回路由层（正是 ADR-0007 要拆掉的东西）；② 降级**只对 tmux 成立**，且它成立的依据是一次 detached-server 实测，不是一条跨版本承诺。⇒ **adapter 在任何 transport 上都照跑 preflight**（有测试钉住路由层不含复用器名）；本条降级的用途是判定优先级——tmux 侧不必再把 preflight 当成不可省的安全垫来论证，而不是允许省掉它。
    - **「fail closed」必须连相位一起写，否则它是歧义的**（「拒绝了」没说清**目标 pane 有没有已经被写入**）：
      | 相位 | 处置 | 结果值 | 退出码 |
      |---|---|---|---|
@@ -237,7 +239,7 @@
 - **两半均已在随发 adapter 落地**（2026-07-30；此前为「规范已落、实现未收敛」）：`scripts/agenttui.py` ①推导出的仓根须含 `.trellis/` 或 `.git/`，否则非零退出拒绝（且**不创建**任何目录），可用 `--repo` 显式指定；②路由改为**能力层**判定——`build_route` 只问「这个 `pane_ref` 有无已注册 transport / 该 transport 可用吗 / 目标 pane 存在吗」，具体复用器命令收在 `PaneTransport` 子类里，复用器名→transport 的映射只在一处注册表；③有发送侧能力检查与 `no-operational-route`（非零退出）。**仍有未实现项**（规则 3 的双指纹/证据等级），逐条见下「随发 adapter 的契约缺口」。
 
 - **参考 adapter（随发 · opt-in · 二选一别混）**：
-  - `scripts/agenttui.py`（adopt 铺到 `<repo>/.trellis/scripts/`）是本契约的 **operational 参考实现**——按注册表 `pane_ref` 经 **transport 抽象**寻址注入（随发只注册了 zellij 一个 transport，其 `write-chars --pane-id` 细节在该 transport 内部）；调用见工具表条目 `agenttui-direct`（`python3 .trellis/scripts/agenttui.py {status|send|heartbeat|stop}`，发前可 `--dry-run` 验路由——dry-run **不跑**存在性探针，因为探针会抢焦点）。**operational 投递一律走它**（而非下面那个演示脚本）。
+  - `scripts/agenttui.py`（adopt 铺到 `<repo>/.trellis/scripts/`）是本契约的 **operational 参考实现**——按注册表 `pane_ref` 经 **transport 抽象**寻址注入（随发注册了**两个并存**的 transport：`zellij` 与 `tmux`，各自的命令行细节只在各自子类内部，见下两张读数总表；选哪个由 `pane_ref.multiplexer` 决定，迁移逐 pane 进行）；调用见工具表条目 `agenttui-direct`（`python3 .trellis/scripts/agenttui.py {status|send|heartbeat|stop}`，发前可 `--dry-run` 验路由——dry-run **不跑**存在性探针，因为探针会抢焦点）。**operational 投递一律走它**（而非下面那个演示脚本）。
     - **调用方须知的三处行为**（按规则 6 落地，非默认兜底）：①目标无可达 pane 时**不再**自动改走 `claude -p --resume`——要走 resume 必须显式加 `--allow-resume`，否则报 `no-operational-route` 并**非零退出**；②`no-operational-route` 的结构化输出带 `reason` / `detail` / `remedy` / `sent=false` / `retry_safe=true`，与规则 4 的各 `*-unverified`（`sent=true` / `retry_safe=false`）**字面区分**——照它判断该不该重发；③**pane 结果值域是规则 4 的七值**（不再有单一的 `queued-unverified`），每条结果带 `submit_action` / `recommended_action` / `verification_guidance`；退出码：`delivered` 与 `queued-for-next-turn` = 0（后者是契约预期状态，不是错误），`composer-unsubmitted` / `write-unverified` / `submit-command-unverified` = 2，`pre-injection-rejected` = 4，`no-operational-route` = 3。**`submit-unverified` 退出 0**（与旧 `queued-unverified` 一致，避免改变既有调用方的成败判断）——它的「不确定」信息在 JSON 里，别拿退出码当送达证据。
     - **⚠️ 它仍未满足契约全部条款**——剩余缺口逐条列在下方「随发 adapter 的契约缺口」，别读成「已满足全部契约」。
   - **`--pane-id` 寻址不免除聚焦（已据实更正）**：本段早前写作「**定向注入**（不靠焦点）」，**那是错的**。**实测**（一个 adopter 实例的 dogfood 巡检；上游 gardener 未独立复现）：`zellij action write-chars --pane-id <目标 pane>` **跨 tab 不生效**，跨 tab 投递必须先 `zellij action focus-pane-id <目标 pane>` 把焦点移过去。
@@ -311,6 +313,42 @@
 
     > **证据标签授予纪律（本节自身就是反例）**：上面被更正的那条，此前挂的是本仓最强的证据标签「**已独立复现**」——而它错了两处。⇒ **授予「已独立复现」必须附原始读数（命令 + rc + stdout 原文 + stderr 原文）；只有结论没有读数的，只能标「已声称复现」。** 理由不是形式主义：同版本、同命令，两个报告都能给出不同的 rc（见上方矛盾），**只标版本救不了，只有原始读数能交叉核验**。证据分级只在标签授予纪律可信时才有意义。
     - 关联：`pane_ref.session` 会因 zellij session **改名**而腐烂——`ZELLIJ_SESSION_NAME` 是**启动时快照**、不回写已运行的进程，故据它推断的 `pane_ref.session` 改名后失效，并落进第一格**静默成功**（证据等级：**下游实测，上游未独立复现**）。规则 5 只管 pane 存在性、**不覆盖这一类**；改名或换复用器后 `pane_ref` 必须整条重建。
+  - **tmux 侧读数总表（第二个随发 transport · 对应契约规则 5）——附原始读数，勿只记结论**。下表每格都是同一版本（`tmux 3.4`）上的直接观测，**rc / 输出分开记**；**采集边界（先读，否则会高估这份证据）**：全部读数取自一个**私有 socket 的 detached server**（`tmux -f /dev/null -L <自取名>`，用完 `kill-server`），**未触碰**任何真人终端、未触碰默认 socket。故「活动 pane / 活动 window 未变」是**服务端状态层**的读数，**不是**「一个真人正看着的附着 client 未被扰动」——后者需 human smoke test，**本表不声称已验证**。
+
+    | 命令与情形 | rc | 输出 |
+    |---|---|---|
+    | `send-keys -t <存在的 pane> -l <text>`（目标**不在活动 window 内**）| `0` | 空；目标**完整收到**，其它 pane **零串投**；session 活动 window 与各 pane `pane_active` 前后**完全未变** |
+    | `send-keys -t <不存在> -l X` | **`1`** | `can't find pane: <目标>` |
+    | `list-panes -t <不存在>` | **`1`** | `can't find pane: <目标>` |
+    | `capture-pane -p -t <不存在>` | **`1`** | `can't find pane: <目标>` |
+    | `has-session -t <不存在>` | **`1`** | `can't find session: <名>` |
+    | 连不上的 socket | **`1`** | `error connecting to <socket 路径>` |
+    | **`display-message -p -t <不存在> '#{pane_id}'`** | **`0`** | **静默回落到「当前 pane」的属性**（输出是当前 pane 的值，不是错误）|
+    | `send-keys -l <4016 字节一次性写入>` | `0` | 目标**逐字节完整**（长度与内容全等）|
+    | `load-buffer` + `paste-buffer -p -t <pane>` | `0` | 目标收到完整内容（bracketed-paste 官方一等通路）|
+
+    由此得到四条结论：
+
+    1. **`send-keys -t` 是真定向、跨 window 生效、且零聚焦副作用** ⇒ **tmux 侧的存在性探针不必是聚焦命令**，这是它相对 zellij 的**实质**优势（zellij 的 `write-chars --pane-id` 跨 tab 不生效、必须先 `focus-pane-id`，见下条）。证据等级：**本机实测（detached server，服务端状态层）+ 官方文档**（`send-keys` 文档未记任何选择/聚焦副作用，而改变活动 pane 是 `select-pane` 的显式职责）。
+    2. **存在性探针用 `list-panes -t` 或 `capture-pane -t`**（不存在 ⇒ rc=1 + `can't find pane:` 文本）。判据仍按 **stdout+stderr 合并文本**（与 zellij 侧同一条纪律）——tmux 的 rc 可信度确实更高，但**不得**把 rc 当唯一判据，理由见下一条。
+    3. **`display-message -p -t <不存在>` 严禁用作存在性判据**：**rc=0 且静默回落到当前 pane** ⇒ 用它做判据必然**假阳性**（把不存在的 pane 认作存在），且更坏——回落来的属性属于**另一个** pane，读起来像一次成功。
+    4. **写入层不再是可疑项**：4016 字节一次 `send-keys -l` 逐字节完整 ⇒ 形态 3（长文本损坏）在 tmux 的**写入层**不复现。这**不**证明 zellij 写入层是元凶（zellij 侧未测），只把它从可疑名单里挪走。
+
+    > **通则（这是本节最该被记住的一条，比两张表都重要）：每种复用器都有一个「看起来最自然的读属性命令」，而它恰恰是**静默回落、rc=0** 的那个。** 两次实测已并列证明：
+    >
+    > | 复用器 | 那条「最自然」的命令 | 读数 | 为什么危险 |
+    > |---|---|---|---|
+    > | zellij | `action dump-screen -p … --pane-id <不存在>` | **rc=0 + 空** | 空输出被读成「pane 在、只是屏幕空」⇒ 假阳性 |
+    > | tmux | `display-message -p -t <不存在> '#{…}'` | **rc=0 + 当前 pane 的属性** | 有输出、格式正确、**属于别的 pane** ⇒ 假阳性，且比空输出更难怀疑 |
+    >
+    > ⇒ **换复用器时必须重新逐格实测，不能假定同名命令同语义**（连「读一个 pane 的属性」这种同名同义的动作，两家的失败语义都相反）。这也是为什么本 guide 对每个 transport 各存一张原始读数表，而不是把结论合成一段通用描述——**合成会把恰恰相反的那一格抹平**。
+    >
+    > 推论（授予证据标签的纪律，见上文 zellij 段末）：上表两行都附了 rc 与输出原文，故可标「已实测」；任何**只有结论、没有读数**的复用器条目只能标「已声称」，不得据以改判据。
+
+    - **tmux 侧对 `pane_ref` 腐烂面的影响（比「少一个 bug」更结构性）**：tmux 的 pane id 形如 `%N`，官方文档明确其**在该 pane 生命期内不变**，且**免疫 window/session 改名与索引重排**（实测：`rename-session` 后 `send-keys -t %N` 仍解析成功）。⇒ 与 zellij 侧「`pane_ref.session` 会因改名腐烂、且腐烂后**静默**投空」形成对比：tmux 的寻址锚在终身不变的 id 上，**不锚在名字上**。
+      - 但随发 adapter **仍然核对** `pane_ref.session`（探针读回该 pane 实际所属 session 名，不符即拒并要求整条重建）。**这不是多余**：一个字段与现实不符的 `pane_ref` 已经腐烂，而「照 id 投得进去」正是让腐烂**继续隐身**的原因；核对把改名后果从**静默投错**变成**响亮拒绝**（`no-operational-route`），符合本 guide「一个能被看见的失败恒优于一个看不见的成功」。
+      - **⚠️ 该核对不是跨 server 的证明**：两个不同 tmux server 可以各有同名 session 与同号 pane，核对不排除这种撞车。真正的对因是给 `pane_ref` 一个 socket 维度——见下方缺口清单。
+    - **自识别句柄**：tmux 把 pane id 注入子进程环境变量 **`TMUX_PANE`**（`$TMUX` 第一段是 socket 路径），⇒ 被投递方可**权威自报**自己是哪个 pane，不必像现行 zellij 流程那样按 `tab_name`+`cwd`+`command` 组合去**猜**自己是哪个 pane（那正是 `pane-ref-conflict` 一族的成因之一）。对应 zellij 的 `ZELLIJ_SESSION_NAME` + pane id 组合。
   - `scripts/agenttui_deliver_zellij.py` 是**契约的 seam 化演示，非 operational**：默认注入器**收 `pane_ref` 却不定向、只写当前焦点 pane**，跨 session / 跨 brand（目标 pane ≠ 焦点 pane）必投错——**未补 `--pane-id` 前不得当跨 pane operational 路**（下游把它误当正道，正是跨 brand 发信「表现不佳 / 不稳定」的根因）。
 - **⚠️ 随发 adapter 的契约缺口（截至 2026-08-05，必须可见——契约不得被读成「代码已做到」）**：随发 `scripts/agenttui.py` **尚未**实现下列契约条款，port 任务另行追踪；在它补齐前，调用方须自行承担对应风险：
   - **规则 3 的 inode+size 双指纹与全文降级**：**仍未实现**——只记 size 作起始偏移，且当**现 size 小于该偏移**（= 文件被重写/截短）时**直接判未命中** ⇒ 目标做过 compact / 会话文件被重写时返回**假阴性**（现在这个假阴性落在 `submit-unverified` 那一格；重发风险，见规则 2）。
@@ -318,6 +356,9 @@
   - **五种形态的读屏分类器（含 `unclassified` 一格与其原始签名归档）**：**仍未实现**——adapter 目前**不做任何读屏分类**，也不写 `unclassified` 档案。它能区分的只是**已执行的动作**（规则 4 的七值：文本有没有写、键有没有按、命令有没有回话、nonce 有没有出现），**不能**区分「文本到了 composer 但被截断」（形态 3）与「目标要求重新登录」（形态 2）——这两格在规则 4 的值域里都表现为 `submit-unverified`。⇒ 下表的形态**只是诊断词汇表，不是 adapter 的输出值域**；形态 2 的模式常量（`provenance: single-observation`）在代码里**尚不存在**。
   - **形态 3 的对因修法只覆盖「写入方式」这一半**：bracketed-paste 成帧已实现（见下方 ✅），但它**只**针对「高速按键流被当成 paste burst、Enter 被吞成换行」这一机制；**不声称**覆盖形态 1（沙箱）与形态 2（认证），也不声称覆盖长文本在 composer 侧的其它损坏形式。
   - **paste 成帧只对 codex 开**：claude-code 未开，因为**没有实测**支持在那里成帧（同名 ≠ 同能力）。这是**证据缺口，不是契约缺口**——规则 1 要求的是「按 brand 白名单」，而白名单当前只有一格。
+  - **`pane_ref` 缺 socket 维度 ⇒ tmux transport 当前只支持默认 server**（2026-08-06 新增；**这一条是 schema 缺口，且残留一格静默误投风险，用前必读**）：tmux 的 `%N` **只在单个 tmux server 内唯一**，而 `pane_ref` 只有 `(multiplexer, session, pane_id)` 三元组、**没有 socket 字段**（`-L <名>` / `-S <路径>`）。随发 tmux transport 因此**只寻址默认 server**（命令不带 `-L`/`-S`）。若被登记的 pane 其实住在另一个 socket 上：多数情况是默认 server 上没有同号 pane ⇒ **响亮拒绝**（可接受）；但若默认 server 上**恰好**有同号 pane，探针的 session 名核对能挡下**名字不同**的那些，**同名同号仍会通过** ⇒ 残留**静默误投**（信封落进第三方 composer，正是 §2.2.1 判为最严重的那一格）。⇒ **在同时跑多个 tmux server 的机器上，除非确认目标 pane 在默认 socket 上，否则不得使用 tmux transport**。对因修法（加 `pane_ref.socket`，连带改 §2.2.1 唯一性三元组、validator、模板）**本次未做**；把 `session` 字段拿来存 socket 名是**明确禁止**的（字段名与内容不符 = 埋雷）。
+  - **tmux 的「不抢焦点」只证到服务端状态层，未证到附着 client**（2026-08-06 新增）：全部 tmux 读数取自 **detached server**。adapter 因此把 `addressing_intrusion` 记为 `no-focus-command-issued`——该值的依据是**构造事实**「本次投递没有发出任何聚焦命令」，**不是**「已证明一个正在看的人没被打扰」；`tab_switched` 一律记 **`null`（未知）而非 `false`**。⇒ **不得**据此宣称迁移已消除侵入性成本；那需要一次 human 在场的 smoke test（zellij 侧同类缺口亦未闭合）。
+  - **tmux 上的提交键语义未在真 ATUI 上验证**（2026-08-06 新增）：adapter 用 `send-keys -H 0d` / `-H 09` 直发契约字节（**刻意不用键名** `send-keys Enter`，键名会走复用器的按键编码，而 `extended-keys` 一类配置可能改变 Enter 的线上编码）。但**没有对一个真的 ATUI 做过 tmux 投递** ⇒ 「Enter=13 / Codex active=Tab=9 这套契约在 tmux 下照旧」目前是**推断**（同样是往 pty 写字节），不是实测。
   规范先于实现落定是**刻意**的（契约是判据、实现向它收敛）；但**凡未实现处必须像这样逐条标注**，不得笼统写成「参考 adapter 已满足上述契约」。
 - **✅ 已收敛的条目（2026-07-30 实现，本清单据实改写；留档以便对照上面那两条仍缺的）**——同时列出**实现带来的已知代价**，别读成「无副作用」：
   - **规则 5 的存在性 preflight（解析合并文本）**：已实现——注入前用 `focus-pane-id` 探针并**按 stdout+stderr 合并文本**判 `Pane with id … not found` / `Session '…' not found`，**不把退出码当成功或拒绝依据**（原因见上方未解决矛盾）；探针失败即 `no-operational-route`、**零注入命令**。**禁用** `dump-screen -p`（对不存在 pane 静默返回空 + rc=0）作判据。
@@ -327,6 +368,7 @@
   - **「投递前置校验」两半**：已实现——路径推导侧见上（仓根须含 `.trellis/` 或 `.git/`，拒绝时不创建任何目录）；路由推导侧改为能力层判定，具体复用器命令封在 transport 子类内、映射集中在一处注册表，故换复用器只加 transport、契约与路由代码不动。
   - **规则 1 的「可达态 / submit 态分离」+ 规则 4 的七值结果模型**（2026-08-05 上游自一个下游采纳仓 port）：已实现——Codex 的提交键改由**目标 transcript 的最新 turn-boundary 事件**决定（不再用新鲜度），settle 后按键前**再刷新一次**，未终止的 JSONL 尾记录按 unknown 处理；结果按已执行动作分七值并带 `submit_action` / `recommended_action` / `verification_guidance` / `retry_safe`。**`retry_safe=true` 仅两格**（`pre-injection-rejected`、`no-operational-route`），且有机械测试钉住这一点。**代价 / 边界**：①`pre-injection-rejected` 时**连 `--dry-run` 也拒绝**（不肯展示一个猜出来的键）；②转录里没有 `task_started`/`task_complete` 的 Codex 目标（例如极早期或异常 rollout）现在**投不出去**而不是猜 Enter——这是刻意的 fail-closed，但确实**收紧**了此前会「蒙一个键」的路径。
   - **规则 1 的 bracketed-paste 成帧（形态 3 的写入方式修法）**：已实现——**仅 codex**；契约层只表达「本次写入需成帧」这一能力意图，`ESC[200~`/`ESC[201~` 只出现在 transport 子类里（机械测试钉住路由层不含该机制）。**它不改路由、不改复用器选择、不改命令条数**——同一条写入命令，只是 payload 被包住。
+  - **第二个 pane transport（`tmux`）与既有 `zellij` transport 并存**（2026-08-06）：已实现——**不是「迁移到 tmux」**，两者同时注册，`pane_ref.multiplexer` 决定用哪个，故既有 pane 可**逐个迁**、不必一次性切；契约与路由代码**一行未动**（这正是 ADR-0007 transport 中立要买的东西：换/加复用器 = 加一个子类 + 一条注册表项）。tmux 侧照实测实现：探针用 `list-panes -t`（**禁用** `display-message -p -t`，理由见上方通则表）、判据按 stdout+stderr 合并文本、寻址锚在终身不变的 `%N`、成帧复用基类 bracketed-paste 经 `send-keys -l` 写入、提交键直发契约字节（`-H`）。**代价 / 边界**：①「不抢焦点」只证到服务端状态层；②只支持默认 tmux server（`pane_ref` 无 socket 维度）；③提交键语义未在真 ATUI 上验证——三条都在上方缺口清单里逐条列出，**别读成「tmux 侧已完全可靠」**。
   - **规则 7 的 resume 生命周期 detach**：已实现——runner 以独立 process session 启动、stdin 接 `DEVNULL`、输出落私有文件（**不接管道**，以免被放弃的 runner 写满缓冲卡在目标 turn 里），`--timeout` 只限制 nonce 观察窗，**代码里没有任何 kill/terminate/送信号路径**（机械测试钉住）；结果为 `delivered` / `resume-started-unverified` / `resume-exited-unverified`，附 `runner_pid` / `runner_state` / `runner_returncode` / `task_completion=unverified`。**代价**：runner 未在观察窗内退出时，它的输出不会出现在本次 stdout 上，只以 `runner_output_path` 报出位置（**该文件不会被本进程清理**——runner 还在写）。
 - **五种「注册表看不出来的投不进 / 投不对」（全部已实测 · 一致性 validator 也查不出 · 别指望注册表告诉你 · 覆盖度的如实表述见本条末，勿写成「病因已覆盖」）**：注册表一致性（§2.2.1 / §4）能排除**归属错**与**寻址错**，但下面这些形态在注册表里**一模一样**——`state=active`、`pane_ref` 有效、`session_file` mtime 新鲜、一致性检查全绿——投递却到不了目的地，或**到了但不是你想说的话**：
 
