@@ -181,6 +181,25 @@ class ThreeGeneralRulesLandedTest(unittest.TestCase):
         # 运气不得记成设计。
         self.assertIn("不得记成设计意图", text)
 
+    def test_enumeration_rule_carries_both_guardrails(self) -> None:
+        text = self.read("spec/guides/verification-and-gates.md")
+        # 护栏 1:枚举该降级为索引,不该被删 —— 缺了它有人会去删表。
+        self.assertIn("枚举式不是「不该有」，是「不该承重」", text)
+        self.assertIn("降级为索引", text)
+        # 护栏 2:穷尽划分不是枚举,附可施加的判据。
+        self.assertIn("穷尽划分 ≠ 枚举", text)
+        self.assertIn("落进某个既有格子，还是需要新开一格", text)
+        # 可证伪预测必须留着,它是判据的检验方式。
+        self.assertIn("可证伪预测", text)
+
+    def test_self_identification_gate_has_a_shape_based_root_rule(self) -> None:
+        registry = self.read("spec/guides/agenttui-registry.md")
+        self.assertIn("凡自识别证据不足以「唯一确定」该 pane ⇒ 拒绝写入", registry)
+        # 表被显式降级为索引,而不是被删。
+        self.assertIn("是【诊断索引】，不是【判定依据】", registry)
+        # 「表里没有」不得成为放行理由 —— 这一行是根规则在表内的落点。
+        self.assertIn("「表里没有」**不是**放行理由", registry)
+
     def test_gate_connectedness_rule_and_its_executor(self) -> None:
         text = self.read("spec/guides/verification-and-gates.md")
         self.assertIn("### 一道从未拒绝过任何东西的门，与不存在的门，在读数上不可区分", text)
