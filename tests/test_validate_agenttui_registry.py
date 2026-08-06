@@ -95,6 +95,7 @@ class RegistryFixture:
         mirror: Any = None,
         session_file: Path | str | None = None,
         generation: int = 1,
+        capabilities: Any = None,
     ) -> Path:
         root = self.project_root(project)
         directory = root / ".arborist" / "agents" / agent
@@ -113,6 +114,8 @@ class RegistryFixture:
             },
             "created": "2000-01-01T00:00:00+00:00",
         }
+        if capabilities is not None:
+            spec["capabilities"] = capabilities
         if lineage is not None:
             spec["lineage"] = lineage
         if mirror is not None:
@@ -1506,3 +1509,71 @@ class ProjectAliasTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CapabilityTriStateTests(FixtureTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.fixture.add_project("repo-a")
+
+    """Check 8 的执行者测试。
+
+    这条规范的价值全在「值命名了上交对象」——所以一个**无法路由**的值不是外观问题，
+    它是一个上交无处可去的门，退化成本字段本来要消除的那次静默跳过。
+    """
+
+    def test_absent_capabilities_is_clean(self) -> None:
+        """缺字段读作 unknown，不是错误 —— 现存 leaf 全都没有这个字段。"""
+        self.fixture.register("repo-a", "impler-one", session_id="sid-a")
+        index = self.fixture.flush()
+        code, out = run_main("--global-index", str(index))
+        self.assertEqual(code, 0, out)
+
+    def test_each_closed_set_value_is_accepted(self) -> None:
+        for i, value in enumerate(("available", "policy-denied", "unavailable")):
+            with self.subTest(value=value):
+                self.fixture.register(
+                    "repo-a",
+                    f"impler-{i}",
+                    session_id=f"sid-{i}",
+                    capabilities={"dispatch_subagent": value},
+                )
+        index = self.fixture.flush()
+        code, out = run_main("--global-index", str(index))
+        self.assertEqual(code, 0, out)
+
+    def test_unrecognised_value_fails_and_names_the_routing_reason(self) -> None:
+        self.fixture.register(
+            "repo-a",
+            "impler-one",
+            session_id="sid-a",
+            capabilities={"dispatch_subagent": "true"},
+        )
+        index = self.fixture.flush()
+        code, out = run_main("--global-index", str(index))
+        self.assertEqual(code, 1, out)
+        self.assertIn("capability-value-invalid", out)
+        # 错误信息必须说清为什么它不可接受，否则读者会以为只是拼写偏好。
+        self.assertIn("escalation target", out)
+
+    def test_boolean_is_rejected_not_coerced(self) -> None:
+        """布尔正是本字段要取代的形态 —— 不得被宽容地接受。"""
+        self.fixture.register(
+            "repo-a",
+            "impler-one",
+            session_id="sid-a",
+            capabilities={"dispatch_subagent": True},
+        )
+        index = self.fixture.flush()
+        code, out = run_main("--global-index", str(index))
+        self.assertEqual(code, 1, out)
+        self.assertIn("capability-value-invalid", out)
+
+    def test_non_object_capabilities_fails(self) -> None:
+        self.fixture.register(
+            "repo-a", "impler-one", session_id="sid-a", capabilities="available"
+        )
+        index = self.fixture.flush()
+        code, out = run_main("--global-index", str(index))
+        self.assertEqual(code, 1, out)
+        self.assertIn("capability-value-invalid", out)
