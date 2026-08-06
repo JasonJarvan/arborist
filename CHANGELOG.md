@@ -507,6 +507,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   has permanent work, and every finding it reports was avoidable.
 
 ### Fixed
+- **Shape 6 splits in two with opposite handling, and the launch invariant written one commit earlier had a
+  logical hole** (`agenttui-registry.md` §3) — continuing the same measurement: the pane later showed the
+  self-update had finished but the CLI **required a manual restart and would not start itself**. At that
+  moment the pane was just a shell, the envelope sent into it was consumed as a command, and the target ATUI
+  **had never existed**. So **6a "starting up"** (waiting works) and **6b "start not completed and will not
+  complete on its own"** (waiting is useless; the launch action must be re-issued) need separating — and the
+  split is itself the argument for a causal readiness criterion: the two are distinguishable *on screen*,
+  but only by recognising each CLI's restart wording, which is exactly the kind of fragile single-observation
+  constant this guide flags elsewhere, whereas **"it never self-registers, however long you wait" decides 6b
+  with no such knowledge**. Screen shape guesses; self-registration decides.
+  The invariant "do not deliver to a spawned ATUI before its self-registration completes" was then found to
+  be unsatisfiable as written: **self-registration requires the session to be activated first**, and
+  activation is what the first message does — so that phrasing forbids ever sending the first message. It now
+  separates by sender: the **spawner's first delivery** only requires that the CLI has taken over the
+  terminal, and it **carries its own criterion** (send a short nonce-bearing pointer; the nonce reaching the
+  target transcript proves readiness *and* receipt — and its absence is 6a, the one and only case where
+  re-sending the same envelope is permitted, precisely because it is the one shape where waiting works),
+  while a **third party's later delivery** does require self-registration, because a third party can only
+  learn the address from the registry and guessing a pane handle is the very error the self-identification
+  gate forbids. The difference is not strictness but **information available**: the spawner knows what it
+  just started and where; a third party does not. Collapsing them into one rule either forbids the first
+  delivery or licenses a third party to guess.
 - **The "trap SIGHUP" cleanup mechanism recorded one commit earlier is refuted by measurement under real use**
   (`agenttui-registry.md` §5.0-b) — closing the outer pane does deliver a catchable `SIGHUP`, and trapping it
   passed end-to-end **in a test where the pane's only foreground process was a script**. Under real use it
