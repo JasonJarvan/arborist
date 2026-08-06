@@ -4,6 +4,7 @@ recipients:
     purpose: <为何读这封交付回报>
     lifecycle: <终止条件，如 "验收完成并蒸馏">
 on_lifecycle_end: burn | archive | wimtb
+lifecycle_executor: <角色>   # 必填：谁真的执行上一行，含销毁前的判据抽取；缺它不得声明 burn
 task: <L2/L3 task 目录>
 multica_issue: <task.json.meta.multica_issue，如有>
 created: <YYYY-MM-DD>

@@ -69,6 +69,7 @@ route_policy:                         # 可选；与 recipient_brand 成对出�
   agent: <selected-agent-or-null>
   model: <selected-model-or-null>
 on_lifecycle_end: burn | archive | wimtb   # wimtb=蒸馏进对应 Multica issue 后 rm
+lifecycle_executor: <角色>                 # 谁真的执行 on_lifecycle_end（含销毁前的判据抽取，见 §生命周期）
 task: <L2/L3 task 目录>
 multica_issue: <task.json.meta.multica_issue，如有>
 created: <YYYY-MM-DD>
@@ -76,6 +77,7 @@ created_in: <来源角色/session>
 ---
 ```
 - 无 frontmatter 又无单一明确收件人的信 = 畸形。
+- **`lifecycle_executor` 是必填**（`on_lifecycle_end` 一旦写了就必须写它）：它是「销毁前的判据抽取」这道门的执行者，**缺它的信不得声明 `burn`**——见 §生命周期。它是**角色**，不是 session 名（信可能 outlive 写它那个 session）。
 
 ## Handoff 信必备正文（交办给执行角色，见 `_TEMPLATE-handoff.md`）
 1. **`read_first`（绝对路径，硬性 N19）**：`<REPO_ROOT>/.trellis/workflow.md` + 相关 guides + 该任务 `prd.md`（worktree/独立 session 看不到被 exclude 的 harness overlay，相对路径悬空）。
@@ -126,6 +128,7 @@ done 回投用 `<REPO_ROOT>/.work_context/sendbox/_TEMPLATE-done.md`（adopt 铺
 - 类别只允许 `实测` / `推断`；一行同时含两者时**必须拆行**。
 - `实测` 的出处必须能让第二读者复核；只写「我看过」「测试绿」不够。
 - `推断` 不是违规，但必须写出已核前提，并在「未验证缺口」点明哪一步尚未验证；**`推断 + 未验证缺口=无` 不合格**。
+- **门 / 机制类结论的缺口栏必须标到「层」**：声称「某个门会拒绝」或「某个机制会生效」时，缺口栏要写**测试没穿过的那一层**（例：`未覆盖 hook 调用链，只测了分类函数`、`未在交互 shell 下验证`、`未过真 socket`），**不接受**「已有回归测试」当出处——「被测那段正确」与「门确实会拒绝」是两个命题，判据见 [`verification-and-gates`](./verification-and-gates.md#门的回归必须端到端且测试的结构必须与真实调用路径同构)。穿过了全部层则照常写 `无`。
 - `实测` 确无缺口时写 `无`（不是留空）。**单表达到 4 行后**，若所有行的非 `无` 缺口经规范化后完全相同，validator 视为「必填字段被一个复制常量满足」并 fail。共同限制确实适用于全表时，也要逐行写清它如何约束**该条**结论；**不提供字符串豁免**。
 
 ### 4. 校验与错误矩阵
@@ -173,6 +176,16 @@ Correct: 无缺口的行写「无」；真有共同限制的行写清该限制�
 - 瞬态（ack/greenlight/blocker/done/fyi）→ **burn**。
 - durable 且映射 L2/L3 → **wimtb**（蒸馏进 Multica issue + 附原信 → 验证 → `rm`；同 verification-and-gates WIMTB 不变式）。
 - 无 EVE 的 durable 信 → 留 `.work_context/` 或升级 guide，不硬塞无关 issue。
+
+### 销毁前的判据抽取（sendbox 是 transient 载体通则的一个实例）
+
+**信有生命周期，信里的判据没有。** 上面三条只规定了「**整封信**何时怎么处置」；而最常见的情形是「一封 `on_lifecycle_end: burn` 的信里有三条值得留的判据」——`burn` 的是**信**，不该是**判据**。通则、落点分流表与 fail-safe 方向见 [`verification-and-gates`](./verification-and-gates.md#transient-载体销毁前必须抽取判据)；本节只给 sendbox 这一侧的落地形状：
+
+- **必答时刻**：执行 `burn` / `archive` / `wimtb` 的**那一刻**（不是写信时，因为判据往往在往返过程中才产生）。
+- **执行者**：frontmatter 的 `lifecycle_executor`。**没有它的信不得声明 `burn`**——否则销毁计划与「创造者记得该删」是同一件事。
+- **机械产物**：销毁动作**之前**，对每一条判据给出一条**可打开核对的引用**（durable 文件路径 + 小节标题），或显式写「本信无判据」。`wimtb` 的「蒸馏进 issue」**只覆盖与该 issue 相关的那部分**——跨任务成立的判据必须另有 durable 落点，不能靠一条 issue 兜住。
+- **fail-safe**：判不准的**不 burn，转 `archive`**。烧掉不可逆，留着只占空间。
+- **同族**：一封信被「录入某张台账后即可 burn」时，台账里必须留**证据指针**（原信可经副仓历史取回）——台账条目本身就是那条引用。
 
 ## Inherit（接收方"继承"handoff——handoff 的读取侧）
 handoff 是**写**（派活方投信）；inherit 是**读/接管**（接收会话"继承"这封信开工）。接收角色开一个新 session 后：

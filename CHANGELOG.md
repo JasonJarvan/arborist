@@ -6,6 +6,97 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
 ## [Unreleased]
 
 ### Added
+- **A gate's regression must be end-to-end, and the test's structure must be isomorphic to the real call
+  path** (`verification-and-gates.md`, cross-referenced from `sendbox.md`'s claim-provenance contract and
+  from `agenttui-registry.md` §5.0-b) — **"the segment under test is correct" and "the gate will actually refuse"
+  are two different propositions**, and passing the first does not entail the second, *because the
+  difference between them is invisible from inside the test*. A green suite is how that invisibility
+  presents itself, not evidence against it. Criterion: **if any layer sits outside the segment under test — hook
+  call chain, shell type, process structure, multiplexer nesting, a real socket or a real server — then
+  that layer's differences cannot be seen from inside the test**; either make the test traverse it, or
+  write down explicitly that this test does not cover it. Silence is not an option. Two measured
+  instances, deliberately kept because they sit on **different dimensions** (one dimension alone reads as
+  "be careful in that one place"): **(i) call-chain layer** — a credential gate's regression `import`ed the
+  classifier directly and passed on hundreds of files with zero false positives, so it tested the
+  classification logic and never the path from *hook invocation* to *refused commit*; a real bypass
+  committing successfully is what exposed it. **(ii) process / shell type** — a signal `trap` meant to clean
+  up an inner multiplexer session when the outer pane closes passed an end-to-end test in which the pane's
+  only foreground process *was the script itself*, whereas real use is a human pasting the command into an
+  interactive shell, where the trap lands on a shell with job control and **never ran** — leaving a session
+  still working and still burning quota while the human believed it closed. Deliberately **parallel to**,
+  not folded into, "a new observation must first prove it does not perturb what it observes": that rule is
+  about a test *doing one thing too many*, this one about a test *traversing one layer too few* — and
+  "my test is read-only, zero perturbation" is precisely this rule's most typical victim. Adds no new gate
+  row (a row without a product is the decoration this guide already rejects); its executor is the existing
+  claim-provenance **"unverified gap"** column, which must now name **the layer the test did not traverse**
+  and may not accept "there is a regression test" as provenance. Corollary recorded: **an artifact landing
+  is not a path taking effect** — an accepted spec, a merged adapter, a green regression are none of them
+  proof that the gate refuses on the real path.
+- **A transient carrier must have its criteria extracted before it is destroyed — what burns is the
+  carrier, not the criteria** (`verification-and-gates.md` general rule + `sendbox.md` instance +
+  `lifecycle_executor` in both sendbox templates) — carriers have lifecycles, criteria do not. Letters,
+  task directories, `research/` output, close-out packets all expire, and a lifecycle field disposes of the
+  **whole carrier** while the common case is "a letter whose lifecycle is `burn` containing three criteria
+  worth keeping". Three precise gaps, which is why this was never a discipline problem: **granularity**
+  (no per-item disposal exists at all), **landing site** ("promoted into durable docs" is uncheckable, and
+  a criterion in the wrong place is a criterion not kept — same shape as a rule outside the injected
+  subset, which no session can read), and **executor** (nobody checks, so the loss is silent *and the
+  un-extracted ones cannot be counted*). Mechanical product: before `burn`/`archive`/distillation, every
+  criterion must be given **one openable reference** (durable file path + section heading) or the carrier
+  must declare **"no criteria here"** — "it was promoted" is not a reference. Landing sites are routed rather than
+  left vague (mechanically enforceable → validator plus a failing test; contract-affecting → ADR; reusable
+  across tasks → `methodology/` or the matching guide; **task-local → stays in the task directory**, since
+  over-promotion dilutes). Executor is the carrier's lifecycle executor, named per carrier — for letters the
+  new required `lifecycle_executor` frontmatter field, and **a letter without one may not declare `burn`**.
+  Fail-safe direction is one-sided on purpose: **what you cannot judge is not burned, it is archived** —
+  burning is irreversible and its loss uncountable, keeping only costs space.
+- **Allowlist over denylist — a gate asks "who approved this", not "what is wrong with this"**
+  (`verification-and-gates.md`, third general rule on gate *design*, parallel to "a gate without an executor
+  is decoration" and "do not wire a gate's trigger to a proxy") — the two questions **fail in opposite
+  directions**: a denylist must enumerate *dangerous shapes*, so its completeness depends on what the author
+  happened to think of and the missing cell **passes silently**; an allowlist enumerates *what is approved*,
+  so the missing cell **fails loudly** and someone comes to ask for approval. Only the loud side can ever be
+  fixed. Evidence strength is recorded **with** the rule because it decides how far the rule can be trusted:
+  it is not extrapolated from one case but **two unrelated problem domains independently converging** — a
+  credential-identification denylist measured failing across three repos, and an external-API publication
+  gate's path-prefix denylist measured failing on its own. **Two different domains beat two instances of one
+  domain**: same-domain pairs may be a property of that domain, cross-domain convergence can only be the
+  rule. The other half ships as a **necessary condition, not a suggestion**: **an allowlist must make
+  approval cheap.** Expensive approval means people route around the gate (`--no-verify`, disable it for a
+  moment, force-add a whole surface), so the gate is missing exactly when it was most needed — the same
+  mechanism as "a gate with many false positives gets learned-around", one entrance making the gate *noisy*
+  and the other making it *expensive*. Hence: a denylist→allowlist conversion is only done when that half is
+  done too; inverting the list while keeping a manual approval round merely trades silent leakage for
+  systematic bypass, whose readings look *better*. One item is deliberately **registered but not landed**:
+  allowlist entries must carry a `scope` (a single-point authorisation otherwise reads as a general one) —
+  it must land **together with** the credential-gate implementation, because landing either half alone loses
+  the other.
+- **Exemplary vs exhaustive lists** (`generalization-boundary.md`) — sync and privacy both run on lists (the
+  sync allowlist, structural exclusions, placeholder tables, the detection layer's pattern set), and
+  **whether a list is exemplary or exhaustive must be written on the list**, because the two demand
+  *opposite* reader actions: absent from an exhaustive list means "it is not in this class, completeness is
+  the author's"; absent from an exemplary list means "**nobody has judged this for you**". The failure mode
+  is one-directional — an exemplary list read as exhaustive turns "was never thought of" into "was
+  adjudicated safe" and the judgement that should have happened silently disappears, whereas the reverse
+  only wastes one judgement. So the default is conservative: **an unlabelled list reads as exemplary**, and
+  claiming exhaustiveness is an explicit act that takes on completeness. The guide's own two lists are now
+  labelled accordingly (the sync allowlist is exhaustive because it is the mechanism's actual input; the
+  excluded-item list is exemplary), and the tie-in is named: layer 2 (regex) can only ever enumerate
+  enumerable patterns, which is why layer 3 (model/human) is not optional at the public boundary.
+- **`delivery ≠ migration`** (`agenttui-registry.md` §3) — a successful delivery, a merged adapter and an
+  accepted contract are none of them "the callers are on this contract". The contract's executor is **every
+  caller**, so "migrated" is a **per-caller** fact and may only be claimed by enumerating and classifying
+  all callers (on the adapter / still hand-injecting raw / no operational route). Auditing incomplete ⇒ no
+  claim of completed sync or migration; using a merge or one successful send to support "migrated" is
+  substituting a weaker reading for the conclusion actually wanted.
+- **A structural generalisation-boundary guard over the whole `overlay/` tree**
+  (`tests/test_overlay_generalization_guard.py`, +6 tests) — the boundary's layer-2 (regex) defence had no
+  executor inside this repo: nothing failed when an absolute home path, an email address, a UUID or a long
+  hex session id landed in a file that gets synced to adopters. It now scans every text file under
+  `overlay/` for those *structural* patterns only. Deliberately **not** codename matching: a list of private
+  codenames inside a public repo would itself be the leak it means to prevent, and codenames are layer-3
+  (model/human) work by this guide's own defence-in-depth split — which is exactly the exemplary/exhaustive
+  labelling above applied to the guard itself.
 - **Three criteria on the shape of a record, grouped under "the shape of a record decides whether the
   judgement can be remade"** (`verification-and-gates.md`) — none of them says "write things down"; each names
   a *dimension* whose absence makes a later re-judgement impossible. **(i) Loudness is not rhetoric**: turning
