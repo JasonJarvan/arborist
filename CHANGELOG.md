@@ -37,6 +37,56 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   target. (The launcher's own wait-for-binary retry protects the launcher, not the sender.)
   Recorded as the third falsification of "the known-cause set is complete" (three shapes → five → six),
   which is the concrete payoff of having insisted on keeping the `unclassified` bucket.
+- **`pane_ref.socket`: pane addressing gains the *server* dimension it was missing**
+  (`agenttui-registry.md` §2.2 / §2.2.1 / §3 / §4, `overlay/scripts/agenttui.py`,
+  `overlay/scripts/validate_agenttui_registry.py`, one tool template, +16 tests) — a pane id in the
+  second pane transport is documented as unique only *within one multiplexer server*, while a
+  `pane_ref` carried `(multiplexer, session, pane_id)` and no socket. That made a pane_ref the name of a
+  pane *number* rather than of a pane: on a machine running several servers, a same-numbered pane on the
+  default server whose session name also matched passed the existence probe, passed the session
+  cross-check, and took the envelope into an uninvolved session's composer — the silent mis-delivery the
+  guide rates as its worst outcome, and the one residual hazard left by the transport when it shipped.
+  The field is **optional and absent means the default server**, so every pane_ref written before it
+  existed produces a byte-identical command line (pinned by a test). The transport addresses **all
+  three** of its commands — existence probe, write, submit — at that server, so preflight is a question
+  about the pane the delivery will actually use; whether the value is a socket *name* or *path* is
+  decided by the value's own shape, which is the same distinction the multiplexer's own two options
+  draw, so no second field is invented and no value means both. Stuffing a socket into `session`
+  instead is **explicitly forbidden**: it costs nothing today and misleads every later reader, including
+  the session cross-check whose whole job is spotting a rotted handle. The uniqueness key in §2.2.1 and
+  in the validator is now the quadruple, because leaving the socket out is wrong in *both* directions —
+  two different real panes on two servers report a conflict that does not exist, and two leaves really
+  contending for one pane can hide behind a spelling. Absent and an explicit `default` normalise to the
+  same server (the default socket *is* named `default`), so uniqueness is enforced on the pane and not
+  on the spelling; the two implementations of that normalisation are pinned to the same answers by a
+  test. Two residual gaps are listed rather than glossed: the normalisation is **lexical only** (a name
+  is never resolved against a path, since that needs the socket directory and uid of whoever wrote the
+  leaf), so one server spelled two ways under-reports a real conflict; and a transport that does not
+  honour the field **ignores it silently**, with no mechanical check yet.
+- **One launch path for humans and agents: `overlay/scripts/atui_launch.sh` (shipped, deliberately not wired)**
+  (`agenttui-launch-and-brand-capacity.md` invariants 7 and 8, +34 tests) — a human-started and an
+  agent-derived ATUI going through two different launch paths forks the `pane_ref` value domain, the
+  self-identification method and the reachability verdict into two, and errors at the fork are
+  **silent**: delivery still reports success, it just lands elsewhere. So there is now exactly one
+  script, called from both sides, with the only permitted difference decided by an *observable fact*
+  (a tty ⇒ attach in the foreground; no tty ⇒ create detached), everything else — server, naming,
+  cleanup hook, identity-variable clearing — byte-identical. Properties, each with a mechanical test:
+  idempotent (already inside the multiplexer ⇒ pass through, because repeated nesting makes the pane
+  handle level unpredictable and the self-identification gate has already measured two real cases of a
+  session mistaking someone else's pane for its own); reversible by one environment variable, whose
+  plan is compared **byte for byte** against the pre-existing launch form; argument-faithful (`"$@"`,
+  never `"$*"`); `--dry-run` prints what it *would* run and runs nothing; and a missing multiplexer is
+  a **non-zero exit rather than quietly not wrapping**, since an unwrapped session simply has no
+  directed handle and that difference is invisible afterwards. Two-stage session naming does the first
+  stage only (`<project>-<pid>`) and **never renames**: renaming is safe only where the addressing
+  handle carries no session name, and this transport's pane_ref carries one *and* cross-checks it, so a
+  rename must be paired with rebuilding the whole pane_ref. It writes no registry entry and never
+  writes the brand — the launched session self-registers its actual runtime brand. **Not wired on
+  purpose**: it is not in the adoption scaffold, no shell startup file is touched, and no existing
+  command name is replaced; a biconditional test makes the guide's "not wired yet" statement and the
+  scaffold agree, so whoever enables it has to update both. What remains is exactly the part that
+  affects a real person: point the human's launch command at it (new name first, replace later) and run
+  one human-present smoke test.
 - **Receiver-side submit-ack handshake: a causal delivery reading next to the existing bystander one**
   (`overlay/scripts/agenttui_submit_ack.py`, `overlay/hook-templates/submit-ack/`,
   `agenttui-registry.md` §3 rule 8, one `[local]` injection entry, +28 tests) — the only delivery
@@ -66,6 +116,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   the seven-value upgrades are, for now, a human reading rather than a mechanical one.
 
 ### Changed
+- **Session cleanup is recommended through the multiplexer's own option again, and its arming moment is now a measured hard rule**
+  (`agenttui-registry.md` §5.0-b) — the section still recommended "capture the close event" (a signal
+  `trap`) in its body while the warning below it recorded that the same mechanism had already been
+  disproved in real use: the trap lands on the *interactive* shell a human pastes into, does not run, and
+  leaves an **invisible live agent** still working and still spending quota. The recommendation is now the
+  multiplexer's built-in "destroy the session when the last client detaches", chosen for one hard reason —
+  it depends on neither a signal nor the kind of shell carrying it, so the test shape and the real usage
+  are isomorphic, which is exactly where the previous version died. Its cost is stated in the same breath
+  rather than in a footnote: the criterion is an *inference* (no client attached) and cannot separate
+  "the human closed the window" from "the human stepped away", so an **inner** detach is collateral
+  damage while anyone using an **outer** detach is unaffected. New, and measured on a private detached
+  server plus a faked pty client: switching the option on while **nothing is attached destroys the session
+  immediately** (the server went with it), which would kill an ATUI started detached before anyone could
+  look at it — and delivery into an unattached server is itself a measured, legitimate shape. So the
+  option **must be armed by the client-attached event, never at session creation**, with the honest
+  consequence spelled out: a session that is never attached will not disappear on its own and needs
+  explicit destruction. The re-test conditions for the still-open "long envelope, busy target" gap are now
+  written down as a table (long envelope, target mid-turn, byte-for-byte comparison, sender-side self-check
+  first, both multiplexers), because "unverified" without the conditions for verifying it is a dead end.
 - **Two tmux-transport gaps closed by one human-present smoke test, and the migration itself withdrawn**
   (`agenttui-registry.md` §3 gap list) — the entries "the no-focus-theft claim is only proven at the server
   state layer, not with a client attached" and "the submit-key semantics were never verified against a real

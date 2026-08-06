@@ -71,6 +71,46 @@ BRACKETED_PASTE_START = "\x1b[200~"
 BRACKETED_PASTE_END = "\x1b[201~"
 NONCE_PATTERN = re.compile(r"[A-Za-z0-9._:-]+")
 
+# ``pane_ref.socket`` — WHICH multiplexer *server* the pane id belongs to.
+# Optional: absent means that transport's default server, so every pane_ref
+# written before this field existed keeps addressing exactly what it addressed.
+#
+# It is load-bearing wherever pane ids are only server-unique (tmux documents
+# ``%N`` as unique within one tmux server). Without it, the
+# (multiplexer, session, pane_id) triple can name two *different* real panes on a
+# machine running several servers: mostly the default server simply has no pane
+# with that number and the send is refused loudly, but if it happens to have one
+# *and* that pane's session name matches, every check passes and the envelope
+# lands in an uninvolved session's composer — the silent mis-delivery the guide
+# rates as its worst outcome (agenttui-registry.md §2.2.1).
+#
+# NEVER carry a socket in ``session`` instead. A field whose name and content
+# disagree costs nothing today and misleads every later reader, including the
+# session cross-check that exists to catch a rotted handle.
+PANE_REF_DEFAULT_SOCKET = "default"
+
+
+def normalize_pane_ref_socket(socket: str | None) -> str:
+    """Lexical identity of the addressed server; absent == the default name.
+
+    tmux's default socket really is *named* ``default``, so an absent field and an
+    explicit ``"default"`` address the same server and must compare equal —
+    otherwise two leaves sitting on one pane would not be seen as colliding, and
+    uniqueness would be enforced on spelling rather than on the pane.
+
+    Deliberately lexical only: a socket *path* is not resolved against a socket
+    *name*, because that mapping depends on the environment of whoever wrote the
+    leaf (socket directory, uid) and is not derivable from the leaf. The residual
+    gap that leaves — the same server written once as a name and once as a path
+    compares unequal — is recorded in agenttui-registry.md §3 rather than papered
+    over with a guess. Mirrored in validate_agenttui_registry.py, and a test pins
+    the two implementations to the same answers.
+    """
+    if socket is None:
+        return PANE_REF_DEFAULT_SOCKET
+    trimmed = socket.strip()
+    return trimmed or PANE_REF_DEFAULT_SOCKET
+
 # A derived repository root is only usable if it really is a project repository.
 # See agenttui-registry.md §3 "delivery preflight" (path-derivation half).
 REPO_MARKERS = (".trellis", ".git")
@@ -590,6 +630,15 @@ def load_agent(repo: Path, name: str) -> AgentRecord:
                 pane_ref_value.get("pane_id"), f"{runtime_path}: pane_ref.pane_id"
             ),
         }
+        socket = pane_ref_value.get("socket")
+        if socket is not None:
+            # Optional (absent = the transport's default server) but *validated*
+            # rather than coerced when present: a blank socket would quietly fall
+            # back to the default server, which is precisely the silent
+            # mis-delivery this field exists to prevent.
+            pane_ref["socket"] = require_text(
+                socket, f"{runtime_path}: pane_ref.socket"
+            )
 
     return AgentRecord(
         name=name,
@@ -1001,13 +1050,16 @@ class TmuxTransport(PaneTransport):
     5. A target's own pane is self-reported through ``TMUX_PANE``, so a pane_ref
        can be registered from authoritative self-knowledge instead of guessed by
        matching cwd and command.
+    6. A pane id is unique only *within one server*, so every command below is
+       addressed to the server named by ``pane_ref.socket`` (``socket_argv``).
+       Omitting that dimension is what previously left a residual silent
+       mis-delivery: on a machine running several servers, a same-numbered pane on
+       the default server whose session name also matched would pass every check.
 
     Known limits, stated rather than implied. The measurements above were taken
     on a server with no client attached, so they are readings of the
     multiplexer's state layer; whether a *watching* human is left undisturbed is
-    not verified here. And a pane id is unique only within one tmux server, while
-    ``pane_ref`` carries no socket field — see the contract-gap list in
-    agenttui-registry.md §3.
+    not verified here.
     """
 
     name = "tmux"
@@ -1032,6 +1084,29 @@ class TmuxTransport(PaneTransport):
             )
         return Capability(True, f"{self.executable} found at {located}")
 
+    @staticmethod
+    def socket_argv(pane_ref: dict[str, str]) -> list[str]:
+        """Address the *server* this pane lives on: ``-L <name>`` or ``-S <path>``.
+
+        A pane id is unique only within one server, so a pane_ref without this
+        dimension is ambiguous on a machine running several — see
+        PANE_REF_DEFAULT_SOCKET for what that ambiguity costs.
+
+        Which of the two options to use is decided by the value's own shape: a
+        value containing a path separator is a socket *path* (``-S``), anything
+        else is a socket *name* (``-L``). That is the same distinction tmux's own
+        two options draw, so no second schema field has to be invented and no
+        single value can mean both.
+
+        An absent socket yields **no arguments at all**, so a pane_ref written
+        before this field existed produces a byte-identical command line.
+        """
+        socket = pane_ref.get("socket")
+        if socket is None or not socket.strip():
+            return []
+        value = socket.strip()
+        return ["-S", value] if os.sep in value else ["-L", value]
+
     def probe_argv(self, pane_ref: dict[str, str]) -> list[str]:
         """Read-only existence probe: errors loudly for a missing pane.
 
@@ -1040,6 +1115,7 @@ class TmuxTransport(PaneTransport):
         """
         return [
             self.executable,
+            *self.socket_argv(pane_ref),
             "list-panes",
             "-t",
             pane_ref["pane_id"],
@@ -1063,7 +1139,15 @@ class TmuxTransport(PaneTransport):
         # everyone. Whether framing happens at all stays the caller's brand-keyed
         # decision (PASTE_FRAMED_BRANDS), identical to the other transport.
         payload = self.frame_paste(text) if paste_framed else text
-        return [self.executable, "send-keys", "-t", pane_ref["pane_id"], "-l", payload]
+        return [
+            self.executable,
+            *self.socket_argv(pane_ref),
+            "send-keys",
+            "-t",
+            pane_ref["pane_id"],
+            "-l",
+            payload,
+        ]
 
     def send_key_argv(self, pane_ref: dict[str, str], key_byte: str) -> list[str]:
         # ``-H <hex>`` sends that literal byte, which is what the submit-key
@@ -1073,6 +1157,7 @@ class TmuxTransport(PaneTransport):
         # may change what Enter looks like on the wire.
         return [
             self.executable,
+            *self.socket_argv(pane_ref),
             "send-keys",
             "-t",
             pane_ref["pane_id"],
@@ -1167,11 +1252,17 @@ class TmuxTransport(PaneTransport):
           whose fields disagree with reality has rotted, and delivering anyway is
           how an envelope lands in a stranger's composer. A whole new pane_ref is
           the remedy; patching one field is not.
+
+        The probe is addressed to the *same server* as the delivery that follows
+        it (``socket_argv``), which is what makes it a preflight for that delivery
+        rather than a question about a different machine-local server that happens
+        to have a pane with the same number.
         """
         observing = self.observe_addressing
         outcome = self._run(self.probe_argv(pane_ref), cwd=None, timeout=None)
         listed_session = self._listed_session(outcome.stdout, pane_ref["pane_id"])
         own_session = self._own_session() if observing else None
+        same_server = self._same_server(pane_ref) if observing else None
         # Not INTRUSION_NONE: that value means "the target happened to be focused
         # already", a reading this probe never takes. Recording it here would let
         # a structural property masquerade as a lucky one in the same denominator.
@@ -1185,12 +1276,25 @@ class TmuxTransport(PaneTransport):
             "active_tab_after": None,
             "tab_switched": None,
             "same_multiplexer_session": (
-                None
+                # A different *server* settles it without comparing names: two
+                # servers can each hold a session of the same name, so comparing
+                # names across servers would answer "same session" about two panes
+                # that cannot see each other.
+                False
+                if same_server is False
+                else None
                 if own_session is None or listed_session is None
                 else own_session == listed_session
             ),
             "probe_is_focus_command": False,
             "observed_pane_session": listed_session,
+            # Which server was addressed, as written in the pane_ref: None means
+            # the default one. Recorded because a delivery to another server is a
+            # different event from one inside the human's own server, and folding
+            # them together is the stratification mistake OBSERVATION_LOG_DEFAULT
+            # exists to avoid.
+            "addressed_socket": pane_ref.get("socket"),
+            "same_multiplexer_server": same_server,
         }
         if outcome.rejected:
             return Capability(
@@ -1251,6 +1355,27 @@ class TmuxTransport(PaneTransport):
         if outcome.rejected or outcome.returncode != 0:
             return None
         return outcome.stdout.strip() or None
+
+    @staticmethod
+    def _same_server(pane_ref: dict[str, str]) -> bool | None:
+        """Is the addressed server this process's own server? None = unknown.
+
+        Comparable only when both sides are socket *paths*: ``$TMUX`` reports a
+        path, while ``pane_ref.socket`` may hold a name, and turning a name into a
+        path means guessing this machine's socket directory and uid. Unknown is
+        therefore reported as None instead of resolved by a guess — the reason the
+        socket dimension exists at all is that a wrong same-server assumption is
+        the silent mis-delivery. Measurement only, and it runs **no command**: the
+        reading comes from an environment variable this process already holds.
+        """
+        own = os.environ.get("TMUX", "").split(",")[0]
+        addressed = (pane_ref.get("socket") or "").strip()
+        if not own or os.sep not in addressed:
+            return None
+        try:
+            return os.path.realpath(own) == os.path.realpath(addressed)
+        except OSError:  # measurement must never break delivery
+            return None
 
     def addressing_intrusion(self) -> str | None:
         return self._last_intrusion

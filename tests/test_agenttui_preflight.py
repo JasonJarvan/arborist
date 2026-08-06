@@ -2397,6 +2397,234 @@ class TmuxTransportTests(unittest.TestCase):
         self.assertEqual("0d", route.submit_argv()[-1])
 
 
+class PaneRefSocketDimensionTests(unittest.TestCase):
+    """`pane_ref.socket` — which multiplexer *server* the pane id belongs to.
+
+    A pane id can be unique only within one server, so without this dimension a
+    pane_ref names a pane *number*, not a pane: on a machine running several
+    servers, a same-numbered pane on the default server whose session name also
+    matched would pass every check and the envelope would land in an uninvolved
+    session's composer, silently.
+    """
+
+    SOCKET_NAME = "placeholder-socket"
+    SOCKET_PATH = "/placeholder/dir/placeholder.sock"
+
+    def transport(self, outcomes: list[FakeCompleted] | None = None):
+        runner = RecordingRunner(outcomes)
+        transport = AGENTTUI.TmuxTransport(
+            runner=runner, which=lambda _name: "/placeholder/tmux"
+        )
+        return transport, runner
+
+    def test_a_socket_name_and_a_socket_path_pick_different_options(self) -> None:
+        # The value's own shape decides, which is the distinction the multiplexer's
+        # own two options draw -- so no second schema field is needed and no single
+        # value can mean both.
+        transport, _runner = self.transport()
+
+        by_name = transport.socket_argv({"socket": self.SOCKET_NAME})
+        by_path = transport.socket_argv({"socket": self.SOCKET_PATH})
+
+        self.assertEqual(["-L", self.SOCKET_NAME], by_name)
+        self.assertEqual(["-S", self.SOCKET_PATH], by_path)
+
+    def test_an_absent_socket_leaves_the_command_line_byte_identical(self) -> None:
+        # Backward compatibility, mechanically: a pane_ref written before this
+        # field existed must produce exactly the commands it produced before.
+        transport, _runner = self.transport()
+        without = pane_ref("tmux")
+
+        self.assertEqual([], transport.socket_argv(without))
+        self.assertEqual([], transport.socket_argv({"socket": "   "}))
+        self.assertEqual(
+            ["tmux", "send-keys", "-t", PANE_ID, "-l", "body"],
+            transport.write_chars_argv(without, "body"),
+        )
+        self.assertEqual(
+            ["tmux", "list-panes", "-t", PANE_ID, "-F", AGENTTUI.TMUX_PANE_LISTING_FORMAT],
+            transport.probe_argv(without),
+        )
+
+    def test_every_command_addresses_the_socket_the_pane_ref_names(self) -> None:
+        # Including the *probe*: a preflight on another server would be a question
+        # about a different pane that happens to carry the same number.
+        transport, _runner = self.transport()
+        reference = dict(pane_ref("tmux"), socket=self.SOCKET_NAME)
+
+        for argv in (
+            transport.probe_argv(reference),
+            transport.write_chars_argv(reference, "body"),
+            transport.send_key_argv(reference, AGENTTUI.PANE_ENTER_BYTE),
+        ):
+            self.assertEqual(["tmux", "-L", self.SOCKET_NAME], argv[:3])
+
+    def test_the_probe_runs_against_the_named_socket(self) -> None:
+        transport, runner = self.transport(
+            [FakeCompleted(stdout=f"{PANE_SESSION}\t{PANE_ID}\n")]
+        )
+        reference = dict(pane_ref("tmux"), socket=self.SOCKET_NAME)
+
+        self.assertTrue(transport.exists(reference).ok)
+        self.assertEqual(["tmux", "-L", self.SOCKET_NAME], runner.calls[0][:3])
+
+    def test_the_schema_accepts_an_optional_socket_and_refuses_a_blank_one(self) -> None:
+        # Optional, but *validated* when present: a blank socket would quietly
+        # fall back to the default server, which is the silent mis-delivery this
+        # field exists to prevent.
+        with TemporaryDirectory() as raw:
+            repo = Path(raw)
+            leaf = repo / ".arborist" / "agents" / TARGET
+            leaf.mkdir(parents=True)
+            (repo / ".trellis").mkdir()
+            (leaf / "spec.json").write_text(
+                json.dumps(
+                    {
+                        "name": TARGET,
+                        "brand": "codex",
+                        "role": "impler",
+                        "project": {
+                            "path": str(repo),
+                            "project_id": "placeholder-project",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def write_runtime(socket_value: object, *, omit: bool = False) -> None:
+                reference: dict[str, object] = {
+                    "multiplexer": "tmux",
+                    "session": PANE_SESSION,
+                    "pane_id": PANE_ID,
+                }
+                if not omit:
+                    reference["socket"] = socket_value
+                (leaf / "runtime.json").write_text(
+                    json.dumps(
+                        {
+                            "session_id": "placeholder-session-id",
+                            "session_file": str(repo / "placeholder.jsonl"),
+                            "state": "active",
+                            "last_seen": "2000-01-01T00:00:00+00:00",
+                            "pane_ref": reference,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            write_runtime(self.SOCKET_NAME)
+            record = AGENTTUI.load_agent(repo, TARGET)
+            assert record.pane_ref is not None
+            self.assertEqual(self.SOCKET_NAME, record.pane_ref["socket"])
+
+            write_runtime(None, omit=True)
+            record = AGENTTUI.load_agent(repo, TARGET)
+            assert record.pane_ref is not None
+            self.assertNotIn("socket", record.pane_ref)
+
+            write_runtime("")
+            with self.assertRaises(AGENTTUI.RegistryError):
+                AGENTTUI.load_agent(repo, TARGET)
+
+    def test_the_socket_never_hides_in_the_session_field(self) -> None:
+        # Stuffing a socket into `session` costs nothing today and misleads every
+        # later reader, including the session cross-check that catches a rotted
+        # handle. Mechanically: the session field is read as a session name only.
+        transport, _runner = self.transport(
+            [FakeCompleted(stdout=f"{self.SOCKET_NAME}\t{PANE_ID}\n")]
+        )
+        reference = dict(pane_ref("tmux"), socket=self.SOCKET_NAME)
+
+        capability = transport.exists(reference)
+
+        self.assertFalse(capability.ok)
+        self.assertIn("rebuilt in full", capability.detail)
+
+    def test_normalisation_agrees_with_the_validator_implementation(self) -> None:
+        # Two copies, one answer: the socket normalisation decides both what the
+        # transport addresses and what the validator calls a collision, and two
+        # different rules there would let a real conflict pass unreported.
+        validator = load_script_module(
+            "overlay/scripts/validate_agenttui_registry.py",
+            "validate_agenttui_registry_socket_agreement",
+        )
+        self.assertEqual(
+            AGENTTUI.PANE_REF_DEFAULT_SOCKET, validator.PANE_REF_DEFAULT_SOCKET
+        )
+        for value in (None, "", "   ", "default", " socket-one ", self.SOCKET_PATH):
+            self.assertEqual(
+                AGENTTUI.normalize_pane_ref_socket(value),
+                validator.normalize_pane_ref_socket(value),
+                value,
+            )
+
+    def test_a_different_server_settles_same_session_without_comparing_names(
+        self,
+    ) -> None:
+        # Two servers can each hold a session of the same name, so comparing names
+        # across servers would answer "same session" about two panes that cannot
+        # see each other. Unknown stays None; only a definite difference is False.
+        transport, _runner = self.transport(
+            [FakeCompleted(stdout=f"{PANE_SESSION}\t{PANE_ID}\n")]
+        )
+        transport.observe_addressing = True
+        original = AGENTTUI.os.environ.get("TMUX")
+        AGENTTUI.os.environ["TMUX"] = "/placeholder/other.sock,1,0"
+        self.addCleanup(
+            lambda: (
+                AGENTTUI.os.environ.__setitem__("TMUX", original)
+                if original is not None
+                else AGENTTUI.os.environ.pop("TMUX", None)
+            )
+        )
+
+        transport.exists(dict(pane_ref("tmux"), socket=self.SOCKET_PATH))
+        observation = transport.addressing_observation()
+
+        self.assertFalse(observation["same_multiplexer_server"])
+        self.assertFalse(observation["same_multiplexer_session"])
+        self.assertEqual(self.SOCKET_PATH, observation["addressed_socket"])
+
+    def test_a_socket_name_against_a_socket_path_stays_unknown(self) -> None:
+        # Turning a name into a path needs the socket directory and uid of whoever
+        # wrote the leaf. Unknown is reported as None rather than resolved by a
+        # guess -- a wrong same-server assumption is the silent mis-delivery.
+        transport, _runner = self.transport(
+            [FakeCompleted(stdout=f"{PANE_SESSION}\t{PANE_ID}\n")]
+        )
+        transport.observe_addressing = True
+        original = AGENTTUI.os.environ.get("TMUX")
+        AGENTTUI.os.environ["TMUX"] = "/placeholder/other.sock,1,0"
+        self.addCleanup(
+            lambda: (
+                AGENTTUI.os.environ.__setitem__("TMUX", original)
+                if original is not None
+                else AGENTTUI.os.environ.pop("TMUX", None)
+            )
+        )
+
+        transport.exists(dict(pane_ref("tmux"), socket=self.SOCKET_NAME))
+
+        self.assertIsNone(
+            transport.addressing_observation()["same_multiplexer_server"]
+        )
+
+    def test_the_server_reading_costs_no_command(self) -> None:
+        # It comes from an environment variable this process already holds, so
+        # recording it adds no observation of the target.
+        transport, runner = self.transport(
+            [FakeCompleted(stdout=f"{PANE_SESSION}\t{PANE_ID}\n")]
+        )
+
+        transport.exists(dict(pane_ref("tmux"), socket=self.SOCKET_PATH))
+
+        self.assertEqual(1, len(runner.calls))
+        self.assertIsNone(
+            transport.addressing_observation()["same_multiplexer_server"]
+        )
+
+
 class TmuxContractWordingTests(unittest.TestCase):
     """The measured tmux trap and the rule-5 downgrade must be written down.
 
@@ -2451,9 +2679,74 @@ class TmuxContractWordingTests(unittest.TestCase):
     def test_the_tmux_specific_gaps_stay_visible(self) -> None:
         guide = self.guide()
 
-        # Pane ids are unique within one server, and pane_ref carries no socket.
+        # Pane ids are unique within one server, so the socket dimension and the
+        # attached-client boundary both have to be written down.
         self.assertIn("socket", guide)
         self.assertIn("attach", guide)
+
+    def test_the_socket_dimension_is_specified_and_its_misuse_forbidden(self) -> None:
+        guide = self.guide()
+
+        self.assertIn("`pane_ref.socket`", guide)
+        self.assertIn("(multiplexer, socket, session, pane_id)", guide)
+        # Stuffing the socket into `session` must stay explicitly forbidden: a
+        # field whose name and content disagree misleads every later reader.
+        self.assertIn("严禁把 socket 塞进 `session` 字段", guide)
+
+    def test_the_residual_socket_gaps_are_listed_not_glossed(self) -> None:
+        # Closing one gap must not quietly create two unlisted ones: the lexical
+        # normalisation and the transports that ignore the field are both real.
+        guide = self.guide()
+
+        self.assertIn("socket 归一化是纯字面的", guide)
+        self.assertIn("静默忽略", guide)
+
+    def test_the_long_text_and_active_target_gap_stays_unverified(self) -> None:
+        # This implementation touches none of that variable combination, so the
+        # gap may not be upgraded by it -- and the guide must say what a valid
+        # re-test needs, or "unverified" is a dead end rather than a next step.
+        guide = self.guide()
+
+        self.assertIn("**未**证任何关于长文本/活跃目标的事", guide)
+        self.assertIn("长信封", guide)
+        self.assertIn("逐字节比对", guide)
+
+
+class SessionLifecycleWordingTests(unittest.TestCase):
+    """The cleanup mechanism the guide recommends must not depend on a signal.
+
+    The previous recommendation (`trap` a hangup signal) passed an end-to-end test
+    in a script shell and failed in the real usage -- a human pasting the command
+    into an interactive shell -- leaving an invisible live agent behind.
+    """
+
+    @staticmethod
+    def guide() -> str:
+        return (ROOT / "overlay/spec/guides/agenttui-registry.md").read_text(
+            encoding="utf-8"
+        )
+
+    def test_the_recommended_mechanism_is_the_builtin_not_a_signal(self) -> None:
+        guide = self.guide()
+
+        self.assertIn("推荐手段 = 复用器内建的「最后一个客户端断开即销毁 session」", guide)
+        self.assertIn("不依赖信号", guide)
+
+    def test_the_known_cost_is_stated_next_to_the_mechanism(self) -> None:
+        # A recommendation without its cost is how the previous wrong prescription
+        # survived: inner detach is collateral damage, outer detach is not.
+        guide = self.guide()
+
+        self.assertIn("内层 detach 会被误伤", guide)
+        self.assertIn("用外层 detach 的人不受影响", guide)
+
+    def test_arming_the_option_without_a_client_is_forbidden(self) -> None:
+        # Measured: switching it on while nothing is attached destroys the session
+        # immediately, which would kill an ATUI started detached.
+        guide = self.guide()
+
+        self.assertIn("不得在建 session 时直接开", guide)
+        self.assertIn("当场被销毁", guide)
 
 
 
