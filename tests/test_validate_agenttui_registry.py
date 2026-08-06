@@ -92,6 +92,9 @@ class RegistryFixture:
         declared_project_id: str | None = None,
         omit_runtime: bool = False,
         broken_spec_json: bool = False,
+        mirror: Any = None,
+        session_file: Path | str | None = None,
+        generation: int = 1,
     ) -> Path:
         root = self.project_root(project)
         directory = root / ".arborist" / "agents" / agent
@@ -112,6 +115,8 @@ class RegistryFixture:
         }
         if lineage is not None:
             spec["lineage"] = lineage
+        if mirror is not None:
+            spec[VALIDATOR.MIRROR_FIELD] = mirror
         if broken_spec_json:
             (directory / "spec.json").write_text("{not json", encoding="utf-8")
         else:
@@ -122,9 +127,12 @@ class RegistryFixture:
         if not omit_runtime:
             runtime: dict[str, Any] = {
                 "session_id": session_id,
-                "session_file": str(self.base / "transcripts" / f"{session_id}.jsonl"),
+                "session_file": str(
+                    session_file
+                    or (self.base / "transcripts" / f"{session_id}.jsonl")
+                ),
                 "state": state,
-                "generation": 1,
+                "generation": generation,
                 "pane_ref": pane_ref,
             }
             if last_seen is not None:
@@ -1097,6 +1105,253 @@ class ComputeProjectIdModeTests(FixtureTestCase):
         self.assertEqual(after, before)
 
 
+MIRROR_HOME_PANE = {
+    "multiplexer": "mux",
+    "session": "s-home",
+    "pane_id": "pane-current",
+}
+MIRROR_STALE_PANE = {
+    "multiplexer": "mux",
+    "session": "s-home",
+    "pane_id": "pane-recycled",
+}
+
+
+def split_blocks(out: str) -> tuple[str, str]:
+    """Split the report into (failures block, warnings block).
+
+    The severity split is only readable if the two blocks stay separate, so the
+    tests assert on which block a code landed in rather than on substring
+    presence anywhere in the output.
+    """
+
+    separator = "--- warnings"
+    if separator not in out:
+        return out, ""
+    head, _, tail = out.partition(separator)
+    return head, tail
+
+
+class MirrorStalenessTests(FixtureTestCase):
+    """Check 7: a cross-project mirror's runtime copy rots by construction.
+
+    The mirrored agent's heartbeat writes only its home leaf, so the copy in the
+    hosting repo goes stale on its own. Severity follows what the divergent field
+    *does*: an addressing field mis-delivers, a snapshot field does not.
+    """
+
+    def build(
+        self,
+        *,
+        mirror: Any = "valid",
+        mirror_pane: Any = MIRROR_HOME_PANE,
+        mirror_last_seen: str = "2000-01-01T00:00:00+00:00",
+        mirror_session_id: str = "sid-peer",
+        mirror_generation: int = 1,
+        home_created: bool = True,
+    ) -> Path:
+        """Two throwaway repos: a home leaf plus a mirror of it in another repo."""
+        home_root = self.fixture.add_project("repo-home")
+        self.fixture.add_project("repo-host")
+        home_leaf = self.fixture.register(
+            "repo-home",
+            "peer-agent",
+            session_id="sid-peer",
+            pane_ref=MIRROR_HOME_PANE,
+        )
+        session_file = str(self.base / "transcripts" / "sid-peer.jsonl")
+        if not home_created:
+            for path in sorted(home_leaf.rglob("*")):
+                path.unlink()
+            home_leaf.rmdir()
+        declaration = (
+            {
+                "home_registry": str(home_leaf),
+                "reason": "cross-repo direct delivery only",
+                "authorized_by": "human, <date>",
+            }
+            if mirror == "valid"
+            else mirror
+        )
+        self.fixture.register(
+            "repo-host",
+            "peer-agent",
+            session_id=mirror_session_id,
+            pane_ref=mirror_pane,
+            last_seen=mirror_last_seen,
+            generation=mirror_generation,
+            session_file=session_file,
+            declared_project_path=home_root,
+            mirror=declaration,
+        )
+        return self.fixture.flush()
+
+    def test_a_stale_pane_ref_is_a_failure(self) -> None:
+        index = self.build(mirror_pane=MIRROR_STALE_PANE)
+
+        code, out = run_main("--global-index", str(index))
+        failures, warnings = split_blocks(out)
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("mirror-stale", failures)
+        self.assertIn("pane_ref", failures)
+        self.assertNotIn("mirror-stale", warnings)
+
+    def test_a_stale_session_id_is_a_failure_too(self) -> None:
+        index = self.build(mirror_session_id="sid-peer-previous")
+
+        code, out = run_main("--global-index", str(index))
+        failures, _ = split_blocks(out)
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("mirror-stale", failures)
+        self.assertIn("session_id", failures)
+
+    def test_a_drifted_last_seen_is_a_warning_not_a_failure(self) -> None:
+        # A mirror *is* a snapshot: red-lighting on this would red-light every
+        # mirror permanently, and a gate people learn to ignore is worse than none.
+        index = self.build(mirror_last_seen="1999-01-01T00:00:00+00:00")
+
+        code, out = run_main("--global-index", str(index))
+        failures, warnings = split_blocks(out)
+
+        self.assertNotIn("mirror-stale", failures)
+        self.assertIn("mirror-snapshot-drift", warnings)
+        self.assertIn("last_seen", warnings)
+        # Exit 1 still, but from the *known-remaining* mirror false positives
+        # (see test_mirror_false_positives_are_still_reported), never from the
+        # snapshot drift itself.
+        self.assertEqual(code, 1, out)
+
+    def test_a_drifted_generation_is_also_only_a_warning(self) -> None:
+        index = self.build(mirror_generation=7)
+
+        _, out = run_main("--global-index", str(index))
+        failures, warnings = split_blocks(out)
+
+        self.assertNotIn("mirror-stale", failures)
+        self.assertIn("generation", warnings)
+
+    def test_an_absent_home_is_a_failure(self) -> None:
+        index = self.build(home_created=False)
+
+        code, out = run_main("--global-index", str(index))
+        failures, warnings = split_blocks(out)
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("mirror-home-unreachable", failures)
+        self.assertIn("orphan", failures)
+        self.assertNotIn("mirror-home-unreachable", warnings)
+
+    def test_an_incomplete_declaration_is_a_failure(self) -> None:
+        index = self.build(mirror={"home_registry": str(self.base / "repo-home")})
+
+        code, out = run_main("--global-index", str(index))
+        failures, _ = split_blocks(out)
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("mirror-declaration-incomplete", failures)
+        self.assertIn("reason", failures)
+        self.assertIn("authorized_by", failures)
+
+    def test_a_relative_home_registry_is_a_failure(self) -> None:
+        index = self.build(
+            mirror={
+                "home_registry": ".arborist/agents/peer-agent",
+                "reason": "cross-repo direct delivery only",
+                "authorized_by": "human, <date>",
+            }
+        )
+
+        code, out = run_main("--global-index", str(index))
+        failures, _ = split_blocks(out)
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("mirror-home-unreachable", failures)
+        self.assertIn("absolute", failures)
+
+    def test_a_home_naming_another_agent_is_a_mismatch(self) -> None:
+        self.fixture.add_project("repo-home")
+        self.fixture.add_project("repo-host")
+        other = self.fixture.register(
+            "repo-home", "other-agent", session_id="sid-other"
+        )
+        self.fixture.register(
+            "repo-host",
+            "peer-agent",
+            session_id="sid-peer",
+            mirror={
+                "home_registry": str(other),
+                "reason": "cross-repo direct delivery only",
+                "authorized_by": "human, <date>",
+            },
+        )
+        index = self.fixture.flush()
+
+        code, out = run_main("--global-index", str(index))
+        failures, _ = split_blocks(out)
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("mirror-home-mismatch", failures)
+
+    def test_an_in_sync_mirror_reports_no_mirror_finding_at_all(self) -> None:
+        index = self.build()
+
+        _, out = run_main("--global-index", str(index))
+
+        self.assertNotIn("mirror-stale", out)
+        self.assertNotIn("mirror-snapshot-drift", out)
+        self.assertNotIn("mirror-home", out)
+
+    def test_a_non_mirror_leaf_is_never_touched_by_this_check(self) -> None:
+        self.fixture.add_project("repo-a")
+        self.fixture.register("repo-a", "impler-one", session_id="sid-a")
+        index = self.fixture.flush()
+
+        code, out = run_main("--global-index", str(index))
+
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("mirror", out)
+
+    def test_mirror_false_positives_are_still_reported(self) -> None:
+        # Deliberately pinned as NOT YET FIXED: guide §2.2.1 asks for these three
+        # checks to be downgraded to info for a well-declared mirror, and that
+        # downgrade is not implemented. The guide's gap list must say so, and this
+        # test is what keeps the two from drifting apart.
+        index = self.build()
+
+        code, out = run_main("--global-index", str(index))
+        failures, _ = split_blocks(out)
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("duplicate-session-id", failures)
+        self.assertIn("project-mismatch", failures)
+
+    def test_the_check_runs_no_external_command(self) -> None:
+        source = inspect.getsource(VALIDATOR.check_mirror_staleness)
+
+        for forbidden in ("subprocess", "os.system", "popen"):
+            self.assertNotIn(forbidden, source)
+
+    def test_field_names_match_the_delivery_adapter(self) -> None:
+        # The validator deliberately does not import the adapter (it must stay
+        # usable in a tree where only it was deployed), so the two spellings are
+        # pinned to each other here instead.
+        adapter = (ROOT / "overlay/scripts/agenttui.py").read_text(encoding="utf-8")
+
+        self.assertIn(f'FOREIGN_REGISTRATION_FIELD = "{VALIDATOR.MIRROR_FIELD}"', adapter)
+        self.assertIn(
+            "FOREIGN_REGISTRATION_REQUIRED = "
+            + repr(VALIDATOR.MIRROR_REQUIRED_FIELDS).replace("'", '"'),
+            adapter,
+        )
+        self.assertIn(
+            "MIRROR_ADDRESSING_FIELDS = "
+            + repr(VALIDATOR.MIRROR_ADDRESSING_FIELDS).replace("'", '"'),
+            adapter,
+        )
+
+
 class WriteTimeProjectIdRuleTests(unittest.TestCase):
     """The rule moved to write time: templates must offer no slot to hand-copy into."""
 
@@ -1137,6 +1392,33 @@ class WriteTimeProjectIdRuleTests(unittest.TestCase):
         self.assertIn("具名裁定", guide)
         self.assertIn("真实 cwd", guide)
         self.assertIn("不裁定、不删、无 `--fix`", guide)
+
+    def test_guide_makes_the_mirror_field_part_of_the_schema(self) -> None:
+        # It was a field that existed in practice and nowhere in the spec, which
+        # is exactly why it rotted unattended.
+        guide = self._read("overlay/spec/guides/agenttui-registry.md")
+
+        self.assertIn(VALIDATOR.MIRROR_FIELD, guide)
+        for field in VALIDATOR.MIRROR_REQUIRED_FIELDS:
+            self.assertIn(field, guide)
+        self.assertIn("2.2.2", guide)
+
+    def test_guide_states_home_is_authoritative_and_says_why_not_fall_back(self) -> None:
+        guide = self._read("overlay/spec/guides/agenttui-registry.md")
+
+        self.assertIn("镜像的 `runtime.json` 不是权威", guide)
+        self.assertIn("绝不回落", guide)
+        # The consequence grading is the reason, so it must travel with the rule.
+        self.assertIn("误投 > 不可达", guide)
+        self.assertIn("一个能被看见的失败恒优于一个看不见的成功", guide)
+
+    def test_guide_gap_list_still_marks_the_unimplemented_parts(self) -> None:
+        # "逐条标注仍未实现处" — the entry may not be summarised as satisfied.
+        guide = self._read("overlay/spec/guides/agenttui-registry.md")
+
+        self.assertIn("三项唯一性检查对镜像**降级为 info** | **未实现**", guide)
+        self.assertIn("**`load_agent` 直接跨仓寻址**", guide)
+        self.assertIn("镜像那份 runtime 拷贝的**自动同步** | **刻意不做**", guide)
 
     def test_gate_matrix_row_mentions_the_readings_and_the_computed_id(self) -> None:
         gates = self._read("overlay/spec/guides/verification-and-gates.md")

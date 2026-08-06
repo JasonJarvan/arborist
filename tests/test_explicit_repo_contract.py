@@ -39,6 +39,11 @@ ROOT = Path(__file__).resolve().parents[1]
 AGENTTUI_SOURCE = ROOT / "overlay" / "scripts" / "agenttui.py"
 CAPACITY_SOURCE = ROOT / "overlay" / "scripts" / "arborist_brand_capacity.py"
 ENTRY_FORM_VALIDATOR = ROOT / "overlay" / "scripts" / "validate_tool_entry_forms.py"
+# `send` 计算（而非手抄）项目限定符，所以它需要注册表 validator 就在同一目录 ——
+# 缺了就 fail-closed 而不是退回 leaf 里声明的 `project_id`。fixture 必须与 `adopt.sh`
+# 实际铺设的形态一致（两个脚本一起进 `.trellis/scripts/`），否则这里测的是一个
+# 现实中不存在的半装状态。
+REGISTRY_VALIDATOR = ROOT / "overlay" / "scripts" / "validate_agenttui_registry.py"
 
 # 占位名，绝非任何实测值。
 SHARED_AGENT = "shared-name-agent"
@@ -125,6 +130,7 @@ class Fixture:
         self.authority_scripts.mkdir(parents=True)
         shutil.copy2(AGENTTUI_SOURCE, self.authority_scripts / AGENTTUI_SOURCE.name)
         shutil.copy2(CAPACITY_SOURCE, self.authority_scripts / CAPACITY_SOURCE.name)
+        shutil.copy2(REGISTRY_VALIDATOR, self.authority_scripts / REGISTRY_VALIDATOR.name)
         write_agent_leaf(
             self.authority, SHARED_AGENT, sentinel=AUTHORITY_SENTINEL, brand="claude-code"
         )
@@ -142,6 +148,7 @@ class Fixture:
         self.caller_scripts.mkdir(parents=True)
         shutil.copy2(AGENTTUI_SOURCE, self.caller_scripts / AGENTTUI_SOURCE.name)
         shutil.copy2(CAPACITY_SOURCE, self.caller_scripts / CAPACITY_SOURCE.name)
+        shutil.copy2(REGISTRY_VALIDATOR, self.caller_scripts / REGISTRY_VALIDATOR.name)
         write_agent_leaf(
             self.caller, SHARED_AGENT, sentinel=CALLER_SENTINEL, brand="claude-code"
         )

@@ -3056,5 +3056,349 @@ class SelfRegistrationRollupTests(unittest.TestCase):
         self.assertEqual("not-requested", result["summary"])
 
 
+HOME_PANE_ID = "placeholder-pane-home"
+RECYCLED_PANE_ID = "placeholder-pane-recycled"
+
+
+def write_cross_project_registry(
+    base: Path,
+    *,
+    mirror_pane_id: str = HOME_PANE_ID,
+    home_registry: str | None = None,
+    mirror_declared_project: Path | None = None,
+    home_leaf_readable: bool = True,
+    mirror_session_id: str | None = None,
+) -> tuple[Path, Path]:
+    """Two throwaway repos: a host repo whose sender reaches a mirrored target.
+
+    Shape is the real one, because `plan_delivery` takes a single repo root: the
+    host repo carries the sender plus a *mirror* leaf for the target, and the
+    target's authoritative leaf lives in the other repo (guide §2.2.1).
+    """
+
+    home_repo = base / "placeholder-home-repo"
+    host_repo = base / "placeholder-host-repo"
+    for repo in (home_repo, host_repo):
+        (repo / ".trellis").mkdir(parents=True)
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+
+    home_session_file = home_repo / f"{TARGET}-session.jsonl"
+    home_session_file.write_text("transcript line\n", encoding="utf-8")
+    home_leaf = home_repo / ".arborist" / "agents" / TARGET
+    home_leaf.mkdir(parents=True)
+    (home_leaf / "spec.json").write_text(
+        json.dumps(
+            {
+                "name": TARGET,
+                "brand": "claude-code",
+                "role": "impler",
+                "project": {
+                    "path": str(home_repo),
+                    "project_id": "placeholder-home-project",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (home_leaf / "runtime.json").write_text(
+        json.dumps(
+            {
+                "session_id": f"{TARGET}-session-id",
+                "session_file": str(home_session_file),
+                "state": "active",
+                "last_seen": now,
+                "pane_ref": {
+                    "multiplexer": FAKE_MUX,
+                    "session": PANE_SESSION,
+                    "pane_id": HOME_PANE_ID,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    if not home_leaf_readable:
+        (home_leaf / "spec.json").unlink()
+        (home_leaf / "runtime.json").unlink()
+        home_leaf.rmdir()
+
+    sender_session_file = host_repo / f"{SENDER}-session.jsonl"
+    sender_session_file.write_text("transcript line\n", encoding="utf-8")
+    sender_leaf = host_repo / ".arborist" / "agents" / SENDER
+    sender_leaf.mkdir(parents=True)
+    (sender_leaf / "spec.json").write_text(
+        json.dumps(
+            {
+                "name": SENDER,
+                "brand": "codex",
+                "role": "impler",
+                "project": {
+                    "path": str(host_repo),
+                    "project_id": "placeholder-host-project",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (sender_leaf / "runtime.json").write_text(
+        json.dumps(
+            {
+                "session_id": f"{SENDER}-session-id",
+                "session_file": str(sender_session_file),
+                "state": "active",
+                "last_seen": now,
+                "pane_ref": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    mirror_leaf = host_repo / ".arborist" / "agents" / TARGET
+    mirror_leaf.mkdir(parents=True)
+    (mirror_leaf / "spec.json").write_text(
+        json.dumps(
+            {
+                "name": TARGET,
+                "brand": "claude-code",
+                "role": "impler",
+                "project": {
+                    "path": str(mirror_declared_project or home_repo),
+                    "project_id": "placeholder-home-project",
+                },
+                "foreign_repo_registration": {
+                    "home_registry": home_registry or str(home_leaf),
+                    "reason": "cross-repo direct delivery only",
+                    "authorized_by": "human, <date>",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (mirror_leaf / "runtime.json").write_text(
+        json.dumps(
+            {
+                # The rotting copy: taken at mirroring time and never refreshed,
+                # because the target's heartbeat only writes its home leaf.
+                "session_id": mirror_session_id or f"{TARGET}-session-id",
+                "session_file": str(home_session_file),
+                "state": "active",
+                "last_seen": now,
+                "pane_ref": {
+                    "multiplexer": FAKE_MUX,
+                    "session": PANE_SESSION,
+                    "pane_id": mirror_pane_id,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return host_repo, home_leaf
+
+
+class CrossProjectMirrorDeliveryTests(unittest.TestCase):
+    """The mirror's runtime is never the authority — asserted through `plan_delivery`.
+
+    Deliberately end-to-end at the *real* entry point rather than at `load_agent`:
+    per verification-and-gates ("门的回归必须端到端，且测试的结构必须与真实调用路径
+    同构"), a test that only exercises the loader proves the classification and not
+    the gate. What has to hold is that the argv the transport is handed addresses
+    the home pane.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.base = Path(self.temporary.name)
+
+    def plan(self, repo: Path) -> tuple["AGENTTUI.DeliveryPlan", FakeTransport]:
+        transport = FakeTransport()
+        plan = AGENTTUI.plan_delivery(
+            repo,
+            sender_name=SENDER,
+            target_name=TARGET,
+            message=MESSAGE,
+            nonce=NONCE,
+            script_path=Path("/placeholder/agenttui.py"),
+            transports={FAKE_MUX: lambda: transport},
+        )
+        return plan, transport
+
+    def test_a_stale_mirror_is_routed_to_the_home_pane_not_the_copy(self) -> None:
+        repo, home_leaf = write_cross_project_registry(
+            self.base, mirror_pane_id=RECYCLED_PANE_ID
+        )
+
+        plan, _ = self.plan(repo)
+
+        self.assertEqual(AGENTTUI.ROUTE_PANE, plan.route.mode)
+        self.assertEqual(HOME_PANE_ID, plan.route.pane_ref["pane_id"])
+        # The argv actually handed to the transport, not just the record: this is
+        # the reading that says where the bytes would go.
+        self.assertIn(HOME_PANE_ID, plan.route.pane_argv())
+        self.assertNotIn(RECYCLED_PANE_ID, plan.route.pane_argv())
+        self.assertEqual(
+            str(home_leaf / "runtime.json"), plan.payload["target_runtime_authority"]
+        )
+
+    def test_the_staleness_is_reported_loudly_on_the_delivery_path(self) -> None:
+        repo, home_leaf = write_cross_project_registry(
+            self.base, mirror_pane_id=RECYCLED_PANE_ID
+        )
+
+        plan, _ = self.plan(repo)
+
+        self.assertEqual(["pane_ref"], plan.payload["target_mirror_stale_fields"])
+        stale = [w for w in plan.payload["warnings"] if w.startswith("mirror-stale:")]
+        self.assertEqual(1, len(stale), plan.payload["warnings"])
+        self.assertIn("pane_ref", stale[0])
+        self.assertIn(str(home_leaf / "runtime.json"), stale[0])
+
+    def test_a_stale_session_id_is_reported_and_home_wins(self) -> None:
+        repo, _ = write_cross_project_registry(
+            self.base, mirror_session_id="placeholder-previous-session-id"
+        )
+
+        plan, _ = self.plan(repo)
+
+        self.assertEqual(["session_id"], plan.payload["target_mirror_stale_fields"])
+        self.assertEqual(f"{TARGET}-session-id", plan.payload["target_session_id"])
+
+    def test_an_unreadable_home_fails_closed_instead_of_using_the_copy(self) -> None:
+        # The whole point: a loud refusal beats a silent delivery into whoever
+        # holds the recycled pane now (guide §2.2.1, 误投 > 不可达).
+        repo, _ = write_cross_project_registry(
+            self.base, mirror_pane_id=RECYCLED_PANE_ID, home_leaf_readable=False
+        )
+
+        with self.assertRaises(AGENTTUI.RegistryError) as caught:
+            self.plan(repo)
+
+        self.assertIn("home_registry", str(caught.exception))
+        self.assertNotIn(RECYCLED_PANE_ID, str(caught.exception))
+
+    def test_zero_pane_commands_run_when_the_home_is_unreadable(self) -> None:
+        repo, _ = write_cross_project_registry(
+            self.base, mirror_pane_id=RECYCLED_PANE_ID, home_leaf_readable=False
+        )
+        transport = FakeTransport()
+
+        with self.assertRaises(AGENTTUI.RegistryError):
+            AGENTTUI.plan_delivery(
+                repo,
+                sender_name=SENDER,
+                target_name=TARGET,
+                message=MESSAGE,
+                nonce=NONCE,
+                script_path=Path("/placeholder/agenttui.py"),
+                transports={FAKE_MUX: lambda: transport},
+            )
+
+        self.assertEqual(0, transport.exists_calls)
+        self.assertEqual([], transport.writes)
+        self.assertEqual([], transport.keys)
+
+    def test_a_relative_home_registry_fails_closed(self) -> None:
+        repo, _ = write_cross_project_registry(
+            self.base, home_registry=".arborist/agents/" + TARGET
+        )
+
+        with self.assertRaises(AGENTTUI.RegistryError) as caught:
+            self.plan(repo)
+
+        self.assertIn("absolute path", str(caught.exception))
+
+    def test_a_home_declaring_another_project_fails_closed(self) -> None:
+        repo, _ = write_cross_project_registry(
+            self.base, mirror_declared_project=self.base / "placeholder-host-repo"
+        )
+
+        with self.assertRaises(AGENTTUI.RegistryError) as caught:
+            self.plan(repo)
+
+        self.assertIn("wrong project", str(caught.exception))
+
+    def test_a_non_mirror_delivery_is_unchanged(self) -> None:
+        # The regression nail: a leaf with no self-declaration must take exactly
+        # the path it always took, including the payload's new keys reading as
+        # "not a mirror".
+        repo = write_registry(self.base, target_pane_ref=pane_ref())
+
+        plan, transport = self.plan(repo)
+
+        self.assertEqual(AGENTTUI.ROUTE_PANE, plan.route.mode)
+        self.assertEqual(PANE_ID, plan.route.pane_ref["pane_id"])
+        self.assertIsNone(plan.payload["target_runtime_authority"])
+        self.assertEqual([], plan.payload["target_mirror_stale_fields"])
+        self.assertEqual([], plan.payload["warnings"])
+        self.assertEqual(1, transport.exists_calls)
+
+    def test_a_non_mirror_plan_reports_exactly_the_route_warnings(self) -> None:
+        # `command_send` now prints the payload's list rather than the route's, so
+        # for every non-mirror send the two must stay the same list, including the
+        # non-empty case (here: an absent pane plus an authorized resume, which
+        # is the one route decision that warns).
+        repo = write_registry(self.base, target_pane_ref=pane_ref())
+
+        plan = AGENTTUI.plan_delivery(
+            repo,
+            sender_name=SENDER,
+            target_name=TARGET,
+            message=MESSAGE,
+            nonce=NONCE,
+            script_path=Path("/placeholder/agenttui.py"),
+            transports={FAKE_MUX: lambda: FakeTransport(exists=False)},
+            allow_resume=True,
+            which=lambda name: f"/placeholder/bin/{name}",
+        )
+
+        self.assertTrue(plan.route.warnings)
+        self.assertEqual(list(plan.route.warnings), plan.payload["warnings"])
+
+    def test_a_non_mirror_record_carries_no_mirror_state(self) -> None:
+        repo = write_registry(self.base, target_pane_ref=pane_ref())
+
+        target = AGENTTUI.load_agent(repo, TARGET)
+
+        self.assertIsNone(target.mirror)
+        self.assertEqual((), target.mirror_stale)
+        self.assertEqual(
+            str(repo / ".arborist" / "agents" / TARGET / "runtime.json"),
+            str(target.runtime_path),
+        )
+
+    def test_a_heartbeat_through_a_mirror_lands_on_the_home_leaf(self) -> None:
+        # Follows from "the runtime half lives at home": the write goes where the
+        # authoritative read came from, and the copy is deliberately not refreshed
+        # (refreshing it *is* the silent sync this design refuses).
+        repo, home_leaf = write_cross_project_registry(
+            self.base, mirror_pane_id=RECYCLED_PANE_ID
+        )
+        mirror_runtime = repo / ".arborist" / "agents" / TARGET / "runtime.json"
+        before = mirror_runtime.read_text(encoding="utf-8")
+
+        result = AGENTTUI.write_runtime_state(
+            repo,
+            TARGET,
+            state="active",
+            now="2026-02-02T00:00:00+00:00",
+            global_index=None,
+        )
+
+        self.assertEqual("written", result["leaf"])
+        home_runtime = json.loads(
+            (home_leaf / "runtime.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual("2026-02-02T00:00:00+00:00", home_runtime["last_seen"])
+        self.assertEqual(before, mirror_runtime.read_text(encoding="utf-8"))
+
+    def test_an_in_sync_mirror_delivers_without_a_warning(self) -> None:
+        repo, _ = write_cross_project_registry(self.base)
+
+        plan, _ = self.plan(repo)
+
+        self.assertEqual([], plan.payload["target_mirror_stale_fields"])
+        self.assertEqual([], plan.payload["warnings"])
+        self.assertEqual(HOME_PANE_ID, plan.route.pane_ref["pane_id"])
+
+
 if __name__ == "__main__":
     unittest.main()

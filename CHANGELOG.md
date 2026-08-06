@@ -5,6 +5,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
 
 ## [Unreleased]
 
+### Fixed
+- **Cross-project delivery no longer addresses a target from a stale mirror copy — the authority is the
+  home leaf, and an unverifiable home fails closed** (`agenttui.py` `load_agent`, new check 7
+  `mirror-stale` in `validate_agenttui_registry.py`, new `agenttui-registry.md` §2.2.2 plus the
+  `foreign_repo_registration` schema row). Cross-project delivery has no repo-crossing parameter — delivery
+  planning takes **one** repo root and loads sender and target from it — so the existing, human-authorised
+  mechanism is a **self-declared mirror**: the sending repo also holds a leaf for the foreign target, whose
+  `project` fields point at the target's real home project. The defect was that the mirror **copied the whole
+  runtime half** (`session_id` / `session_file` / `pane_ref` / `last_seen` / `generation`) while the target's
+  heartbeat only ever writes its **home** leaf ⇒ the copy rots by construction, and nothing ever followed
+  `home_registry`. **Consequence grading is why this is a fix and not a nicety**: pane ids are reused in
+  sequence (measured), so a stale `pane_ref` addresses **whoever holds that pane now** — the guide's
+  most severe class, *silent mis-delivery* into a third party's composer, versus *unreachable*, which is
+  loud, bounded to the sender, and gets chased down. Hence **fail closed rather than fall back**: if
+  `home_registry` is absent, relative, unreadable, names another agent, names another project, or is itself
+  a mirror, the delivery **raises** — falling back to the copy would trade a loud error for a quiet
+  mis-delivery, and *a failure that can be seen always beats a success that cannot*. The mirror's runtime
+  copy is **kept but demoted to diagnostics**: when its addressing fields disagree with home, the delivery
+  path says so loudly (`warnings`, `target_mirror_stale_fields`, `target_runtime_authority`) rather than
+  silently re-syncing, because a silent sync would hide the very fact that mirrors rot. Validator severity
+  follows **what the field does**, not how far it drifted: addressing fields
+  (`session_id`/`session_file`/`pane_ref`) are failures, snapshot fields (`last_seen`, `state`,
+  `generation`, …) are warnings — failing on the latter would red-light every mirror permanently, and a gate
+  people learn to ignore is worse than none. Read-only, no `--fix`, no external command, same discipline as
+  the other six checks. **Still not implemented, recorded per item** (guide §2.2.1 status table and §3 gap
+  list): direct cross-repo addressing without a mirror leaf; downgrading
+  `duplicate-session-id`/`pane-ref-conflict`/`project-mismatch` to info for a well-declared mirror (mirrors
+  still raise those known false positives); automatic creation, recycling, or syncing of mirrors — the last
+  deliberately, since syncing would hide the rot.
+
 ### Added
 - **An interface that silently falls back to some default target when a locating argument is missing must be
   wrapped fail-closed at our layer** (`verification-and-gates.md` general rule + `agenttui-registry.md`

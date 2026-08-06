@@ -6,7 +6,7 @@ daemon**: every writer appends its own leaf and, optionally, a global summary.
 That shape makes two classes of pollution structurally possible, and the guide
 named both without ever giving them an executor — this script is the executor.
 
-Six checks run over one global index plus the project leaf trees it points at:
+Seven checks run over one global index plus the project leaf trees it points at:
 
 1. **`session_id` global uniqueness** — one session belongs to one project. The
    same `session_id` claimed by leaves in two repos means one of them is a
@@ -52,6 +52,27 @@ Six checks run over one global index plus the project leaf trees it points at:
    blank to copy into.
 6. **index summary vs leaf agreement** — `role` / `brand` / `state` / `lineage`
    (absent reads as 1) must match, with the **leaf as authoritative** (guide §1).
+7. **cross-project mirror staleness** — a leaf that declares itself a mirror
+   (`foreign_repo_registration`, guide §2.2.1) carries a *copy* of another repo's
+   runtime half, and the mirrored agent's heartbeat only ever writes its **home**
+   leaf. So the copy rots by construction, and the delivery path reads home rather
+   than the copy. This check reports where the copy has already diverged, split by
+   **what the divergent field does**:
+
+   * `mirror-stale` (failure, exit 1) — an *addressing* field diverges
+     (`session_id` / `session_file` / `pane_ref`). A stale `pane_ref` is the
+     high-severity case in guide §2.2.1's consequence table: panes are reused in
+     sequence, so it addresses whoever holds that pane now — silently, and into a
+     third party's composer.
+   * `mirror-declaration-incomplete` / `mirror-home-unreachable` /
+     `mirror-home-mismatch` (failures) — the declaration cannot be validated, so
+     delivery through this leaf is fail-closed and the mirror is effectively an
+     orphan.
+   * `mirror-snapshot-drift` (**warning only**) — a non-addressing field diverges
+     (`last_seen`, `state`, `generation`, `description`, …). A mirror *is* a
+     snapshot; red-lighting on this would red-light every mirror permanently, and
+     a gate people learn to ignore is worse than none (same reasoning as
+     `stale-addressing-handle`).
 
 Both half-registered directions are reported under the guide's own term
 `half-registered` — neither "unregistered" nor "registered" — because the repair
@@ -180,6 +201,23 @@ UNREACHABLE_STATES = ("stopped",)
 # imported from there on purpose: this validator runs no delivery code and must
 # stay usable in a tree where only it was deployed.
 PANE_REF_DEFAULT_SOCKET = "default"
+
+# The self-declaration that marks a leaf as a cross-project mirror (guide §2.2.1).
+# Mirrors are human-authorised and must never be deleted on this evidence: the only
+# effect of deleting one is that the hosting repo loses its ability to reach that
+# agent at all. What is checked instead is whether the copy still says the truth.
+#
+# Kept as literals rather than imported from `agenttui.py` for the same reason
+# `normalize_pane_ref_socket` is duplicated: this validator runs no delivery code
+# and has to stay usable in a tree where only it was deployed. A test pins both
+# spellings to the same values.
+MIRROR_FIELD = "foreign_repo_registration"
+MIRROR_REQUIRED_FIELDS = ("home_registry", "reason", "authorized_by")
+
+# Split by what the field *does*, not by how far it drifted: these three decide
+# where an envelope goes (resume handle, liveness probe, pane address), so a stale
+# one mis-delivers. Everything else in a mirrored runtime is a snapshot field.
+MIRROR_ADDRESSING_FIELDS = ("session_id", "session_file", "pane_ref")
 
 
 class GlobalIndexError(RuntimeError):
@@ -802,6 +840,186 @@ def check_summary_agreement(
     return findings
 
 
+def declared_project_path(spec: dict[str, Any]) -> Path | None:
+    """One spec's own `spec.project.path`, resolved, or None if unusable."""
+
+    project = spec.get("project")
+    if not isinstance(project, dict):
+        return None
+    declared = project.get("path")
+    if not isinstance(declared, str) or not declared:
+        return None
+    candidate = Path(declared).expanduser()
+    return candidate.resolve() if candidate.exists() else candidate.absolute()
+
+
+def check_mirror_staleness(
+    leaves: Sequence[Leaf],
+) -> tuple[list[Finding], list[Finding]]:
+    """Check 7, in two halves that must not be folded into one.
+
+    Returns `(failures, warnings)`. The split is by **what the divergent field
+    does**, not by how big the divergence is: an addressing field decides where the
+    envelope goes, so a stale one is the silent-mis-delivery case; every other
+    field is a snapshot whose divergence is the normal condition of a mirror. A
+    mirror that red-lights permanently is a mirror nobody looks at.
+    """
+
+    failures: list[Finding] = []
+    warnings: list[Finding] = []
+    for leaf in leaves:
+        declaration = leaf.spec.get(MIRROR_FIELD)
+        if declaration is None:
+            continue
+        where = f"{leaf.where}/{SPEC_NAME}"
+        if not isinstance(declaration, dict):
+            failures.append(
+                Finding(
+                    "mirror-declaration-incomplete",
+                    f"{where}: {MIRROR_FIELD} must be an object with "
+                    + ", ".join(MIRROR_REQUIRED_FIELDS),
+                )
+            )
+            continue
+        missing = [
+            field
+            for field in MIRROR_REQUIRED_FIELDS
+            if not isinstance(declaration.get(field), str)
+            or not declaration[field].strip()
+        ]
+        if missing:
+            failures.append(
+                Finding(
+                    "mirror-declaration-incomplete",
+                    f"{where}: {MIRROR_FIELD} is missing " + ", ".join(missing) + ". "
+                    "All three are required: without home_registry there is no "
+                    "authority to read the runtime half from, and without reason / "
+                    "authorized_by this leaf is indistinguishable from the "
+                    "mis-registration the uniqueness checks exist to catch "
+                    "(guide §2.2.1 — judge the *kind* of duplicate first).",
+                )
+            )
+            continue
+
+        home_declared = Path(declaration["home_registry"])
+        if not home_declared.is_absolute():
+            failures.append(
+                Finding(
+                    "mirror-home-unreachable",
+                    f"{where}: {MIRROR_FIELD}.home_registry is not an absolute "
+                    f"path: {declaration['home_registry']!r}. A relative path "
+                    "resolves against whatever cwd the reader happened to run in.",
+                )
+            )
+            continue
+        home = home_declared.expanduser()
+        home = home.resolve() if home.exists() else home.absolute()
+        if not home.is_dir():
+            failures.append(
+                Finding(
+                    "mirror-home-unreachable",
+                    f"{where}: {MIRROR_FIELD}.home_registry does not exist: {home}. "
+                    "The mirror is an orphan: delivery through it is fail-closed "
+                    "(it must not fall back to this leaf's own stale runtime copy), "
+                    "so either the home leaf moved or this mirror outlived it.",
+                )
+            )
+            continue
+        try:
+            home_spec = read_json_object(home / SPEC_NAME)
+            home_runtime = read_json_object(home / RUNTIME_NAME)
+        except ValueError as exc:
+            failures.append(
+                Finding(
+                    "mirror-home-unreachable",
+                    f"{where}: {MIRROR_FIELD}.home_registry {home} is not a "
+                    f"readable leaf: {exc}",
+                )
+            )
+            continue
+
+        home_name = home_spec.get("name")
+        if home_name != leaf.name:
+            failures.append(
+                Finding(
+                    "mirror-home-mismatch",
+                    f"{where} mirrors agent {leaf.name!r} but its home "
+                    f"{home / SPEC_NAME} names {reading_value(home_name)}. The "
+                    "mirror addresses an agent other than the one it claims.",
+                )
+            )
+            continue
+        mirror_project = declared_project_path(leaf.spec)
+        home_project = declared_project_path(home_spec)
+        if mirror_project != home_project:
+            failures.append(
+                Finding(
+                    "mirror-home-mismatch",
+                    f"{where} declares project.path "
+                    f"{reading_value(str(mirror_project) if mirror_project else None)} "
+                    f"but its home {home / SPEC_NAME} declares "
+                    f"{reading_value(str(home_project) if home_project else None)}. A "
+                    "mirror's project fields must name the agent's real home project "
+                    "(guide §2.2.1), so a divergence means the mirror points at the "
+                    "wrong home.",
+                )
+            )
+            continue
+
+        stale = [
+            field
+            for field in MIRROR_ADDRESSING_FIELDS
+            if leaf.runtime.get(field) != home_runtime.get(field)
+        ]
+        if stale:
+            failures.append(
+                Finding(
+                    "mirror-stale",
+                    f"{leaf.where}/{RUNTIME_NAME} disagrees with its authoritative "
+                    f"leaf {home / RUNTIME_NAME} on addressing field(s) "
+                    + ", ".join(stale)
+                    + ". These decide where an envelope goes, and the mirrored "
+                    "agent's heartbeat only ever writes the home leaf, so the copy "
+                    "rots by construction. A stale pane_ref is the high-severity "
+                    "case in guide §2.2.1: panes are reused in sequence, so it "
+                    "addresses whoever holds that pane now — silently, into a third "
+                    "party's composer. Delivery already reads home, so this is not "
+                    "a live mis-delivery through the adapter; it is a mis-delivery "
+                    "for anybody reading this leaf directly. Repair by re-copying "
+                    "the home runtime, or drop the copy — never by editing single "
+                    "fields.\n"
+                    f"    home runtime: {reading_value(home_runtime.get('session_id'))} "
+                    f"/ {reading_value(home_runtime.get('pane_ref'))}\n"
+                    f"    mirror copy:  {reading_value(leaf.runtime.get('session_id'))} "
+                    f"/ {reading_value(leaf.runtime.get('pane_ref'))}",
+                )
+            )
+
+        snapshot_fields = sorted(
+            (set(leaf.runtime) | set(home_runtime)) - set(MIRROR_ADDRESSING_FIELDS)
+        )
+        drifted = [
+            field
+            for field in snapshot_fields
+            if leaf.runtime.get(field) != home_runtime.get(field)
+        ]
+        if drifted:
+            warnings.append(
+                Finding(
+                    "mirror-snapshot-drift",
+                    f"{leaf.where}/{RUNTIME_NAME} differs from its authoritative "
+                    f"leaf {home / RUNTIME_NAME} on non-addressing field(s) "
+                    + ", ".join(drifted)
+                    + ". A mirror *is* a snapshot: these fields do not decide where "
+                    "an envelope goes, so this is a cleanup item and deliberately "
+                    "not a failure — every mirror would otherwise red-light "
+                    "permanently, and a gate people learn to ignore is worse than "
+                    "none.",
+                )
+            )
+    return failures, warnings
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         allow_abbrev=False,
@@ -809,8 +1027,8 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Validate AgentTUI registry consistency: session_id and pane_ref "
             "global uniqueness, both half-registered directions, project-field "
-            "self-consistency, and index-summary vs leaf agreement. Read-only "
-            "by design — it reports, it never repairs."
+            "self-consistency, index-summary vs leaf agreement, and cross-project "
+            "mirror staleness. Read-only by design — it reports, it never repairs."
         ),
         epilog=(
             "failures (exit 1; each reported with its own code):\n"
@@ -826,6 +1044,16 @@ def build_parser() -> argparse.ArgumentParser:
             "  project-mismatch         spec.project.path != the repo hosting the leaf\n"
             "  project-id-mismatch      project_id != sha256 prefix of realpath(path)\n"
             "  index-leaf-disagreement  role/brand/state/lineage differ (leaf wins)\n"
+            "  mirror-stale             a cross-project mirror's runtime copy disagrees\n"
+            "                           with its home leaf on an ADDRESSING field\n"
+            "                           (session_id/session_file/pane_ref) = the silent\n"
+            "                           mis-delivery class for any reader of that copy\n"
+            "  mirror-declaration-incomplete  foreign_repo_registration lacks\n"
+            "                           home_registry/reason/authorized_by\n"
+            "  mirror-home-unreachable  home_registry absent, relative, or unreadable\n"
+            "                           => the mirror is an orphan and delivery through\n"
+            "                           it is fail-closed\n"
+            "  mirror-home-mismatch     home leaf names a different agent or project\n"
             "\n"
             "warnings (listed separately, do NOT affect the exit code):\n"
             "  stale-addressing-handle  a non-reachable leaf still carries a pane_ref.\n"
@@ -833,6 +1061,10 @@ def build_parser() -> argparse.ArgumentParser:
             "                           reused in sequence, so this is the normal\n"
             "                           aftermath of a session ending. Folding it into\n"
             "                           pane-ref-conflict would bury the real ones.\n"
+            "  mirror-snapshot-drift    a mirror's NON-addressing fields (last_seen,\n"
+            "                           state, generation, ...) differ from home. A\n"
+            "                           mirror is a snapshot; failing on this would\n"
+            "                           red-light every mirror permanently.\n"
             "\n"
             "exit codes:\n"
             "  0  registry consistent (a check count is printed; warnings may be listed)\n"
@@ -959,6 +1191,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     findings.extend(
         check_summary_agreement(leaves, summaries_by_key, index_path=index_path)
     )
+    mirror_failures, mirror_warnings = check_mirror_staleness(leaves)
+    findings.extend(mirror_failures)
+    warnings.extend(mirror_warnings)
 
     counts = (
         f"checked {len(project_roots)} project(s), {len(leaves)} leaf/leaves, "

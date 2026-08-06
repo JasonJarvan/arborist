@@ -480,6 +480,19 @@ class AgentRecord(NamedTuple):
     # valid; the point of rolling it up is that a cross-project reader looking for
     # "the current holder of this role" needs it in the summary, not just the leaf.
     lineage: int = 1
+    # Set only for a leaf that declares itself a cross-project mirror. When set,
+    # every runtime field above was read from `mirror.runtime_path` (the home leaf,
+    # the only place the target's heartbeat writes), and `mirror_stale` lists the
+    # addressing fields where the mirror's own copy has already rotted. Both
+    # default to "not a mirror", so every existing construction site is unchanged.
+    mirror: "MirrorRegistration | None" = None
+    mirror_stale: tuple[str, ...] = ()
+    # The project half of this agent's cross-project identity: `project_id`
+    # **derived from `project_path`**, not the literal in the spec (a hand-copied
+    # literal is how one repo splits into two identities, guide §2.3). Empty means
+    # "not derived", which every consumer must treat as unqualified rather than
+    # local; `load_agent` always fills it.
+    project_qualifier: str = ""
 
 
 class Capability(NamedTuple):
@@ -703,6 +716,268 @@ def require_text(value: Any, label: str) -> str:
     return value
 
 
+# --- project-qualified agent identity ----------------------------------------
+#
+# An agent name is unique **within one project**, never across the machine, so a
+# bare name is not an identity: two repos routinely hold a same-role agent under
+# the same name. That makes an unqualified `from=` in an envelope ambiguous in the
+# worst possible direction — the receiver reads it as **its own repo's** agent of
+# that name, so the envelope is not just mis-addressed, it is **signed with
+# somebody else's name**, and everything the receiver sees is self-consistent.
+#
+# The path is demonstrable rather than anecdotal, and both halves are re-checkable:
+# (a) `send --repo <other repo> --from <name>` **passes** registry validation
+# whenever that other repo happens to hold a leaf of the same name, and (b) the
+# envelope carried no project qualifier at all. No claim is made here that such a
+# delivery has actually happened.
+#
+# Qualifier = the registry's `project_id`, never the repository's directory name:
+# a directory can be renamed and one repository can have several worktrees, while
+# `project_id` is derived from `realpath` (guide §2.1) and so answers "which
+# project instance" mechanically.
+QUALIFIED_NAME_SEPARATOR = "."
+
+# A 12-hex prefix followed by the separator. Strict enough that a bare name
+# containing a dot cannot be mistaken for a qualified one, which matters because
+# the fallback for "unqualified" must never be "assume this repo".
+QUALIFIED_NAME_PATTERN = re.compile(r"^([0-9a-f]{12})\.(.+)$")
+
+REGISTRY_VALIDATOR_MODULE_NAME = "validate_agenttui_registry.py"
+
+
+def registry_project_id(path: Path) -> str:
+    """`project_id` for one repo root, computed by the registry's own implementation.
+
+    Deliberately not reimplemented here, for the same reason the ack module refuses
+    to: two implementations of a derived id is how one repo ends up with two ids
+    (guide §2.3). Unlike the ack module, an unavailable implementation **fails
+    closed** rather than recording null — the value signs the envelope, and an
+    unsigned envelope is precisely the gap this qualifier closes.
+    """
+
+    module_path = Path(__file__).resolve().parent / REGISTRY_VALIDATOR_MODULE_NAME
+    if not module_path.is_file():
+        raise RegistryError(
+            f"{REGISTRY_VALIDATOR_MODULE_NAME} is not installed next to this script, "
+            "so the project qualifier that identifies this project cannot be "
+            "computed. Refusing to send an envelope whose from/to would be a bare "
+            "name: a bare name reads as the receiver's own agent of that name"
+        )
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_agenttui_registry_validator", module_path
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        # Registered before exec: a module executed while absent from sys.modules
+        # cannot resolve its own name (the validator's dataclasses then fail with
+        # an unrelated-looking AttributeError).
+        sys.modules["_agenttui_registry_validator"] = module
+        spec.loader.exec_module(module)
+        return str(module.project_id_for(path))
+    except RegistryError:
+        raise
+    except Exception as exc:
+        sys.modules.pop("_agenttui_registry_validator", None)
+        raise RegistryError(
+            f"cannot compute the project qualifier for {path} via "
+            f"{REGISTRY_VALIDATOR_MODULE_NAME}: {exc}"
+        ) from exc
+
+
+def parse_qualified_name(value: str) -> tuple[str | None, str]:
+    """Split `<project_id>.<name>` into its halves; a bare name yields None.
+
+    None means **unqualified**, which is explicitly *not* "belongs to this repo":
+    silently reading it as local is the defect this whole facility addresses.
+    """
+
+    match = QUALIFIED_NAME_PATTERN.match(value.strip())
+    if match is None:
+        return None, value.strip()
+    return match.group(1), match.group(2)
+
+
+def qualified_name(agent: AgentRecord) -> str:
+    """How this agent is named to anybody outside its own project."""
+
+    return f"{agent.project_qualifier}{QUALIFIED_NAME_SEPARATOR}{agent.name}"
+
+
+def load_agent_by_reference(repo: Path, reference: str) -> AgentRecord:
+    """Load a leaf named either bare or `<project_id>.<name>`, fail closed on mismatch.
+
+    A qualified reference is **verified against the leaf actually loaded**, so
+    pasting the `from=` out of a received envelope into a reply cannot resolve to
+    this repo's same-named agent: it refuses instead. That is the receiver-side
+    half of the qualifier — without it, a qualified name in an envelope would be
+    decoration a replier's command line silently discards.
+    """
+
+    qualifier, name = parse_qualified_name(reference)
+    agent = load_agent(repo, name)
+    if qualifier is not None and qualifier != agent.project_qualifier:
+        raise RegistryError(
+            f"project-qualified name {reference!r} does not name the agent that "
+            f"{repo} holds under {name!r}: that leaf's project qualifier is "
+            f"{agent.project_qualifier} (project {agent.project_path}). Same name, "
+            "different instance — refusing rather than resolving to the local "
+            "agent of that name, which would deliver to, or sign as, somebody "
+            "else. If the intended agent lives in another project, register an "
+            "authorised mirror of it here (spec field "
+            f"{FOREIGN_REGISTRATION_FIELD}) instead of borrowing this leaf"
+        )
+    return agent
+
+
+class MirrorRegistration(NamedTuple):
+    """A leaf that declares itself a cross-project mirror of an authoritative one.
+
+    Cross-project delivery has no repo-crossing parameter: ``plan_delivery`` takes
+    one repo root and loads *both* sides from it, so "repo A's sender reaches repo
+    B's target" is expressible only by giving repo A a second leaf for that target
+    (guide §2.2.1: a human-authorised mirror, not stray data). What the mirror may
+    not carry is *authority*: its runtime half is a copy taken at mirroring time,
+    while the target's heartbeat only ever writes its **home** leaf.
+    """
+
+    home: Path
+    spec_path: Path
+    runtime_path: Path
+    reason: str
+    authorized_by: str
+
+
+# The self-declaration that makes a mirror a mirror. All three are required: a
+# mirror without `home_registry` has no authority to defer to, and one without
+# `reason` / `authorized_by` is indistinguishable from the mis-registration the
+# uniqueness checks exist to catch (guide §2.2.1, "先判性质，再判对错").
+FOREIGN_REGISTRATION_FIELD = "foreign_repo_registration"
+FOREIGN_REGISTRATION_REQUIRED = ("home_registry", "reason", "authorized_by")
+
+# Runtime fields that *address* the target: a stale value here sends the envelope
+# somewhere. `session_id` addresses the resume route, `pane_ref` the pane route,
+# and `session_file` is the probe every reachability decision is derived from, so
+# a stale one routes off a state that was never observed. Divergence in these is
+# reported loudly on the delivery path (and as a validator failure); everything
+# else in a mirrored runtime is a snapshot field whose divergence is expected.
+MIRROR_ADDRESSING_FIELDS = ("session_id", "session_file", "pane_ref")
+
+
+def resolve_mirror_registration(
+    spec: dict[str, Any],
+    *,
+    spec_path: Path,
+    name: str,
+    project_path: Path,
+) -> MirrorRegistration | None:
+    """Validate a leaf's mirror self-declaration, or return None if it has none.
+
+    Every failure here raises. A mirror whose home cannot be validated must not
+    silently degrade to "use the copy": the copy's `pane_ref` is exactly the stale
+    handle this whole path exists to stop using, and panes get reused in sequence,
+    so the degraded read delivers into whoever holds that pane now — silently, and
+    into a third party (guide §2.2.1: 误投 > 不可达, 一个能被看见的失败恒优于一个
+    看不见的成功).
+    """
+
+    declaration = spec.get(FOREIGN_REGISTRATION_FIELD)
+    if declaration is None:
+        return None
+    if not isinstance(declaration, dict):
+        raise RegistryError(
+            f"{spec_path}: {FOREIGN_REGISTRATION_FIELD} must be an object"
+        )
+    values = {
+        field: require_text(
+            declaration.get(field), f"{spec_path}: {FOREIGN_REGISTRATION_FIELD}.{field}"
+        )
+        for field in FOREIGN_REGISTRATION_REQUIRED
+    }
+
+    home_declared = Path(values["home_registry"])
+    if not home_declared.is_absolute():
+        raise RegistryError(
+            f"{spec_path}: {FOREIGN_REGISTRATION_FIELD}.home_registry must be an "
+            f"absolute path to the authoritative leaf directory, got "
+            f"{values['home_registry']!r}; a relative path would resolve against "
+            "whatever cwd the sender happened to run in"
+        )
+    home = home_declared.resolve()
+    if not home.is_dir():
+        raise RegistryError(
+            f"{spec_path}: {FOREIGN_REGISTRATION_FIELD}.home_registry is not a "
+            f"directory: {home}. Refusing to fall back to this mirror's own runtime "
+            "copy: it is a snapshot taken at mirroring time and its pane_ref may "
+            "now address a pane a different session owns"
+        )
+    if home == spec_path.parent.resolve():
+        raise RegistryError(
+            f"{spec_path}: {FOREIGN_REGISTRATION_FIELD}.home_registry points at "
+            "this same leaf, so the mirror claims to be its own authority"
+        )
+
+    home_spec_path = home / "spec.json"
+    home_runtime_path = home / "runtime.json"
+    home_spec = read_json(home_spec_path)
+    if FOREIGN_REGISTRATION_FIELD in home_spec:
+        raise RegistryError(
+            f"{home_spec_path} is itself a mirror ({FOREIGN_REGISTRATION_FIELD} "
+            "present): mirror chains are refused, a mirror must name the "
+            "authoritative leaf directly"
+        )
+    home_name = require_text(home_spec.get("name"), f"{home_spec_path}: name")
+    if home_name != name:
+        raise RegistryError(
+            f"mirror points at the wrong agent: {spec_path} mirrors {name!r} but "
+            f"{home_spec_path} names {home_name!r}"
+        )
+    home_project = home_spec.get("project")
+    if not isinstance(home_project, dict):
+        raise RegistryError(f"{home_spec_path}: project must be an object")
+    home_project_path = Path(
+        require_text(home_project.get("path"), f"{home_spec_path}: project.path")
+    ).expanduser()
+    home_project_path = (
+        home_project_path.resolve()
+        if home_project_path.exists()
+        else home_project_path.absolute()
+    )
+    if home_project_path != project_path:
+        raise RegistryError(
+            f"mirror points at the wrong project: {spec_path} declares "
+            f"project.path {project_path} but its home {home_spec_path} declares "
+            f"{home_project_path}. A mirror's project fields must name the agent's "
+            "real home project (guide §2.2.1), so a divergence here means the "
+            "mirror addresses an agent other than the one it claims"
+        )
+    return MirrorRegistration(
+        home=home,
+        spec_path=home_spec_path,
+        runtime_path=home_runtime_path,
+        reason=values["reason"],
+        authorized_by=values["authorized_by"],
+    )
+
+
+def mirror_addressing_drift(
+    mirror_runtime: dict[str, Any],
+    home_runtime: dict[str, Any],
+) -> tuple[str, ...]:
+    """Which addressing fields the mirror's stale copy disagrees with home on.
+
+    Reported, never silently repaired: rewriting the mirror to match would hide
+    the fact that mirrors rot at all, and that fact is the reason the home leaf
+    has to be read on every delivery rather than periodically synced.
+    """
+
+    return tuple(
+        field
+        for field in MIRROR_ADDRESSING_FIELDS
+        if mirror_runtime.get(field) != home_runtime.get(field)
+    )
+
+
 def load_agent(repo: Path, name: str) -> AgentRecord:
     leaf = repo / ".arborist" / "agents" / name
     spec_path = leaf / "spec.json"
@@ -725,6 +1000,22 @@ def load_agent(repo: Path, name: str) -> AgentRecord:
     ).resolve()
     if not project_path.is_dir():
         raise RegistryError(f"registered project path is not a directory: {project_path}")
+
+    # A leaf without the self-declaration takes exactly the path it always took:
+    # `mirror` is None, nothing below is reached, and every field still comes from
+    # this repo's own runtime.json (pinned by test).
+    mirror = resolve_mirror_registration(
+        spec, spec_path=spec_path, name=spec_name, project_path=project_path
+    )
+    mirror_stale: tuple[str, ...] = ()
+    if mirror is not None:
+        home_runtime = read_json(mirror.runtime_path)
+        mirror_stale = mirror_addressing_drift(runtime, home_runtime)
+        # The mirror's own runtime copy is kept on disk (deleting it would break
+        # readers that only know the mirror) but is demoted to diagnostics: from
+        # here on, every addressing value comes from home.
+        runtime = home_runtime
+        runtime_path = mirror.runtime_path
 
     state = require_text(runtime.get("state"), f"{runtime_path}: state")
     if state not in {"active", "stopped", "idle"}:
@@ -778,6 +1069,13 @@ def load_agent(repo: Path, name: str) -> AgentRecord:
         spec_path=spec_path,
         runtime_path=runtime_path,
         lineage=lineage,
+        mirror=mirror,
+        mirror_stale=mirror_stale,
+        # One value, two uses — deliberately the *same* `project_path` that the
+        # mirror check validated against home above. Addressing reads home and the
+        # signature signs home because both derive from this one resolved path; two
+        # separate derivations would be two things free to drift apart.
+        project_qualifier=registry_project_id(project_path),
     )
 
 
@@ -791,11 +1089,24 @@ def delivery_marker_fields(
             "nonce must be a non-empty token containing only "
             "ASCII letters, digits, dot, underscore, colon, or hyphen"
         )
+    # `from` / `to` are **project-qualified**, always. A bare name is unique only
+    # inside one project, so an unqualified `from=` is read by the receiver as its
+    # own agent of that name: the envelope arrives signed with somebody else's
+    # name, and nothing the receiver can see contradicts it.
+    #
+    # `identity_form` is what makes the older, unqualified form mechanically
+    # distinguishable instead of merely absent: a reader that finds this field
+    # knows from/to can be compared against its own project_id, and a reader that
+    # does NOT find it knows the names in that envelope are unqualified and
+    # therefore **cannot** be used to judge instance identity. Absence had to be
+    # given a meaning, because the alternative — treating an unqualified name as
+    # local — is exactly the defect.
     return [
-        f"from={sender.name}",
+        f"from={qualified_name(sender)}",
         f"from_brand={sender.brand}",
-        f"to={target.name}",
+        f"to={qualified_name(target)}",
         f"nonce={nonce}",
+        "identity_form=project-qualified",
         "provenance=declared-not-authenticated",
     ]
 
@@ -851,10 +1162,14 @@ def build_envelope(
             "--repo",
             str(repo),
             "send",
+            # Project-qualified on both sides, for the same reason the marker is:
+            # a reply pasted with bare names resolves against whatever repo the
+            # replier is standing in. (Only these two values are qualified here;
+            # the rest of this command's shape is owned elsewhere.)
             "--from",
-            target.name,
+            qualified_name(target),
             "--to",
-            sender.name,
+            qualified_name(sender),
             "--message",
             "<reply>",
         ]
@@ -1966,6 +2281,31 @@ def derive_effective_state(
     }
 
 
+def mirror_warnings(*agents: AgentRecord) -> list[str]:
+    """One loud line per mirrored leaf whose addressing copy has rotted.
+
+    Said on the delivery path rather than fixed in place, because "the mirror is
+    rotting" is the fact worth surfacing: a silent re-sync would leave the next
+    reader believing a mirror's runtime can be trusted, which is how a stale
+    `pane_ref` gets used to address whoever holds that pane now.
+    """
+
+    lines: list[str] = []
+    for agent in agents:
+        if agent.mirror is None or not agent.mirror_stale:
+            continue
+        lines.append(
+            f"mirror-stale: {agent.name!r} is registered here as a cross-project "
+            f"mirror and its own runtime copy disagrees with the authoritative leaf "
+            f"on {', '.join(agent.mirror_stale)}. This delivery used the values "
+            f"from {agent.mirror.runtime_path} (the home leaf, the only place this "
+            f"agent's heartbeat writes); the copy at {agent.spec_path.parent}/"
+            f"runtime.json is stale and is NOT used for addressing. Left as-is on "
+            "purpose: re-syncing it silently would hide that mirrors rot."
+        )
+    return lines
+
+
 class DeliveryPlan(NamedTuple):
     payload: dict[str, Any]
     route: DeliveryRoute
@@ -1985,8 +2325,11 @@ def plan_delivery(
     observe_addressing: bool = False,
     which: Callable[[str], str | None] = shutil.which,
 ) -> DeliveryPlan:
-    sender = load_agent(repo, sender_name)
-    target = load_agent(repo, target_name)
+    # By reference, not by bare name: a `--from` / `--to` carrying a project
+    # qualifier is checked against the leaf it resolves to, so naming another
+    # project's agent refuses instead of quietly using the local same-named one.
+    sender = load_agent_by_reference(repo, sender_name)
+    target = load_agent_by_reference(repo, target_name)
     if sender.brand not in SUPPORTED_BRANDS:
         raise RegistryError(f"unsupported sender brand: {sender.brand!r}")
     target_state = derive_effective_state(target)
@@ -2024,8 +2367,13 @@ def plan_delivery(
     payload = {
         "protocol": PROTOCOL,
         "sender": sender.name,
+        # The names as anybody outside these projects must read them. Kept beside
+        # the bare ones rather than replacing them: the bare name is still the key
+        # inside its own project, and conflating the two is the confusion here.
+        "sender_qualified": qualified_name(sender),
         "sender_brand": sender.brand,
         "target": target.name,
+        "target_qualified": qualified_name(target),
         "target_brand": target.brand,
         "target_session_id": target.session_id,
         "target_declared_state": target.state,
@@ -2035,6 +2383,13 @@ def plan_delivery(
         "target_submit_activity": codex_submit_activity,
         "target_state_diagnostic": target_state["diagnostic"],
         "target_session_file": str(target.session_file),
+        # Where the addressing values above actually came from. None means "this
+        # repo's own leaf"; a path means the target is registered here as a
+        # cross-project mirror and the authority was read from its home leaf.
+        "target_runtime_authority": (
+            str(target.mirror.runtime_path) if target.mirror is not None else None
+        ),
+        "target_mirror_stale_fields": list(target.mirror_stale),
         "nonce": nonce,
         "delivery_marker": build_delivery_marker(sender, target, nonce),
         "cwd": str(route.cwd),
@@ -2054,7 +2409,7 @@ def plan_delivery(
             )
         ),
         "resume_authorized": allow_resume,
-        "warnings": list(route.warnings),
+        "warnings": list(route.warnings) + mirror_warnings(sender, target),
     }
     return DeliveryPlan(payload=payload, route=route)
 
@@ -2966,7 +3321,11 @@ def command_send(args: argparse.Namespace, repo: Path) -> int:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
-    for warning in route.warnings:
+    # The payload's list, not the route's: it is the route's warnings plus the
+    # mirror-staleness lines, which have to be as loud as the route ones (a stale
+    # mirror is a mis-delivery that already happened once). Identical output for
+    # every non-mirror send, where the two lists are equal.
+    for warning in payload["warnings"]:
         print(f"warning: {warning}", file=sys.stderr)
     if route.mode == ROUTE_PANE:
         return send_via_pane(
