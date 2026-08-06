@@ -263,6 +263,14 @@ class TransportDecouplingTests(unittest.TestCase):
         self.assertIsInstance(AGENTTUI.resolve_transport("zellij"), AGENTTUI.PaneTransport)
         self.assertIsNone(AGENTTUI.resolve_transport("no-such-multiplexer"))
 
+    def test_two_transports_coexist_so_migration_can_be_per_pane(self) -> None:
+        # The registry is also the value domain of pane_ref.multiplexer. Both
+        # entries stay registered on purpose: an existing pane_ref keeps working
+        # while panes move one at a time, instead of a flag day.
+        self.assertEqual({"zellij", "tmux"}, set(AGENTTUI.TRANSPORTS))
+        self.assertIs(AGENTTUI.TmuxTransport, AGENTTUI.TRANSPORTS["tmux"])
+        self.assertIsInstance(AGENTTUI.resolve_transport("tmux"), AGENTTUI.PaneTransport)
+
 
 class ExistencePreflightTests(unittest.TestCase):
     """Rule 5: probe must report errors, and be judged by stdout text."""
@@ -2091,6 +2099,361 @@ class ObservationRecordingTests(unittest.TestCase):
 
         for forbidden in ("intrusion_rate", "focus_moved_ratio", "intrusion_percent"):
             self.assertNotIn(forbidden, source)
+
+
+class TmuxTransportTests(unittest.TestCase):
+    """The second pane transport: directed writes, and a read-only probe.
+
+    Every reading behind these cases was measured on a private detached tmux
+    server, never on anyone's terminal. No real multiplexer is involved here
+    either: the runner is faked at the same seam as the other transport's tests.
+    """
+
+    def transport(self, outcomes: list[FakeCompleted] | None = None):
+        runner = RecordingRunner(outcomes)
+        transport = AGENTTUI.TmuxTransport(
+            runner=runner, which=lambda _name: "/placeholder/tmux"
+        )
+        return transport, runner
+
+    @staticmethod
+    def listing(session: str = PANE_SESSION, pane: str = PANE_ID) -> str:
+        # Shape of `list-panes -F '#{session_name}\t#{pane_id}'`: one line per pane
+        # in the addressed window (placeholders only, never observed values).
+        return f"{session}\tplaceholder-other-pane\n{session}\t{pane}\n"
+
+    def test_the_probe_is_read_only_and_never_a_property_read(self) -> None:
+        transport, _runner = self.transport()
+
+        probe = transport.probe_argv(pane_ref("tmux"))
+
+        self.assertIn("list-panes", probe)
+        # Measured rc=0 for a missing target while silently falling back to the
+        # *current* pane -- the same shape of trap as the other transport's screen
+        # dump, so it may never be the existence criterion.
+        self.assertNotIn("display-message", probe)
+
+    def test_no_command_this_transport_can_issue_moves_the_focus(self) -> None:
+        # The substantive advantage over a focus-addressed transport: the probe
+        # does not have to be the focus command, so preflight disturbs nobody.
+        transport, _runner = self.transport()
+        reference = pane_ref("tmux")
+
+        commands = [
+            transport.probe_argv(reference),
+            transport.write_chars_argv(reference, "body"),
+            transport.send_key_argv(reference, AGENTTUI.PANE_ENTER_BYTE),
+        ]
+
+        for argv in commands:
+            for forbidden in ("select-pane", "select-window", "focus"):
+                self.assertNotIn(forbidden, " ".join(argv))
+
+    def test_the_only_property_read_is_a_self_query_without_a_target(self) -> None:
+        # Mechanical: the banned command appears exactly once in the transport, in
+        # the self-query, and that call site passes no target.
+        source = inspect.getsource(AGENTTUI.TmuxTransport._own_session)
+        whole = inspect.getsource(AGENTTUI.TmuxTransport)
+
+        self.assertIn("display-message", source)
+        self.assertNotIn('"-t"', source)
+        self.assertEqual(1, whole.count('"display-message"'))
+
+    def test_a_missing_pane_is_refused_with_zero_injection_commands(self) -> None:
+        transport, runner = self.transport(
+            [FakeCompleted(returncode=1, stderr="can't find pane: %placeholder\n")]
+        )
+        target = make_record(pane_ref=pane_ref("tmux"))
+
+        with self.assertRaises(AGENTTUI.NoOperationalRoute) as caught:
+            AGENTTUI.build_route(
+                target,
+                "envelope",
+                transports={"tmux": lambda: transport},
+                codex_submit_activity="idle",
+            )
+
+        self.assertEqual("pane-not-reachable", caught.exception.reason)
+        self.assertEqual(1, len(runner.calls))
+        self.assertIn("list-panes", runner.calls[0])
+
+    def test_the_text_decides_even_though_this_transport_exits_non_zero(self) -> None:
+        # rc is more trustworthy here than on the other transport, but it is still
+        # not the criterion: one tmux command answers rc=0 for a missing target.
+        transport, _runner = self.transport(
+            [FakeCompleted(returncode=0, stderr="can't find pane: %placeholder\n")]
+        )
+
+        capability = transport.exists(pane_ref("tmux"))
+
+        self.assertFalse(capability.ok)
+        self.assertIn("can't find pane", capability.detail)
+
+    def test_a_missing_server_is_an_addressing_failure_too(self) -> None:
+        transport, _runner = self.transport(
+            [
+                FakeCompleted(
+                    returncode=1,
+                    stderr="no server running on /placeholder/socket\n",
+                )
+            ]
+        )
+
+        self.assertFalse(transport.exists(pane_ref("tmux")).ok)
+
+    def test_a_non_zero_code_alone_never_decides_reachability(self) -> None:
+        transport, _runner = self.transport(
+            [FakeCompleted(returncode=1, stdout="", stderr="some unfamiliar text")]
+        )
+
+        capability = transport.exists(pane_ref("tmux"))
+
+        # Refused -- but for the listing, not for the exit code: the probe simply
+        # never said anything about the addressed pane.
+        self.assertFalse(capability.ok)
+        self.assertIn("not among the panes", capability.detail)
+
+    def test_a_listed_pane_in_the_registered_session_is_reachable(self) -> None:
+        transport, runner = self.transport([FakeCompleted(stdout=self.listing())])
+
+        capability = transport.exists(pane_ref("tmux"))
+
+        self.assertTrue(capability.ok)
+        self.assertEqual(1, len(runner.calls))
+        self.assertEqual(
+            AGENTTUI.INTRUSION_NO_FOCUS_COMMAND, transport.addressing_intrusion()
+        )
+
+    def test_a_session_name_disagreement_is_refused_as_a_rotted_handle(self) -> None:
+        # Addressing by pane id would have worked; a pane_ref whose fields
+        # disagree with reality has rotted, and delivering anyway is how an
+        # envelope lands in a stranger's composer.
+        transport, _runner = self.transport(
+            [FakeCompleted(stdout=self.listing(session="placeholder-renamed"))]
+        )
+
+        capability = transport.exists(pane_ref("tmux"))
+
+        self.assertFalse(capability.ok)
+        self.assertIn("rebuilt in full", capability.detail)
+        self.assertIn("not patched field by field", capability.detail)
+
+    def test_an_answer_that_omits_the_target_is_not_evidence_of_it(self) -> None:
+        transport, _runner = self.transport(
+            [FakeCompleted(stdout=f"{PANE_SESSION}\tplaceholder-other-pane\n")]
+        )
+
+        self.assertFalse(transport.exists(pane_ref("tmux")).ok)
+
+    def test_an_unreachable_pane_records_no_intrusion_value(self) -> None:
+        transport, _runner = self.transport(
+            [FakeCompleted(returncode=1, stderr="can't find pane: %placeholder\n")]
+        )
+
+        transport.exists(pane_ref("tmux"))
+
+        self.assertIsNone(transport.addressing_intrusion())
+
+    def test_a_read_only_probe_is_not_recorded_as_already_focused(self) -> None:
+        # "Nobody was disturbed because no focus command exists" and "the target
+        # happened to be focused already" are different facts; merging them would
+        # let a structural property hide inside the same denominator as a lucky
+        # reading, which is exactly the question a migration decision asks.
+        transport, _runner = self.transport([FakeCompleted(stdout=self.listing())])
+
+        transport.exists(pane_ref("tmux"))
+
+        self.assertNotEqual(AGENTTUI.INTRUSION_NONE, transport.addressing_intrusion())
+        self.assertEqual(
+            "no-focus-command-issued", AGENTTUI.INTRUSION_NO_FOCUS_COMMAND
+        )
+
+    def test_the_window_switch_reading_stays_unknown_rather_than_false(self) -> None:
+        # Measured on a server with no client attached, so "an attached human is
+        # undisturbed" is NOT verified. None means unknown; False would claim it.
+        transport, _runner = self.transport([FakeCompleted(stdout=self.listing())])
+
+        transport.exists(pane_ref("tmux"))
+        observation = transport.addressing_observation()
+
+        self.assertIsNone(observation["tab_switched"])
+        self.assertFalse(observation["probe_is_focus_command"])
+        self.assertEqual(PANE_SESSION, observation["observed_pane_session"])
+
+    def test_not_observing_issues_no_extra_commands(self) -> None:
+        transport, runner = self.transport([FakeCompleted(stdout=self.listing())])
+
+        transport.exists(pane_ref("tmux"))
+
+        self.assertEqual(1, len(runner.calls))
+        self.assertIsNone(
+            transport.addressing_observation()["same_multiplexer_session"]
+        )
+
+    def test_observing_adds_the_self_query_and_stratifies_the_event(self) -> None:
+        transport, runner = self.transport(
+            [
+                FakeCompleted(stdout=self.listing()),
+                FakeCompleted(stdout=f"{PANE_SESSION}\n"),
+            ]
+        )
+        transport.observe_addressing = True
+        original = AGENTTUI.os.environ.get("TMUX_PANE")
+        AGENTTUI.os.environ["TMUX_PANE"] = "%placeholder-own-pane"
+        self.addCleanup(
+            lambda: (
+                AGENTTUI.os.environ.__setitem__("TMUX_PANE", original)
+                if original is not None
+                else AGENTTUI.os.environ.pop("TMUX_PANE", None)
+            )
+        )
+
+        transport.exists(pane_ref("tmux"))
+
+        self.assertEqual(2, len(runner.calls))
+        self.assertIn("display-message", runner.calls[1])
+        self.assertTrue(
+            transport.addressing_observation()["same_multiplexer_session"]
+        )
+
+    def test_outside_the_multiplexer_the_self_query_is_skipped(self) -> None:
+        # No self-identification handle means the answer is unknown, and asking
+        # anyway would add a command for a caller who cannot use the reading.
+        transport, runner = self.transport([FakeCompleted(stdout=self.listing())])
+        transport.observe_addressing = True
+        original = AGENTTUI.os.environ.pop("TMUX_PANE", None)
+        if original is not None:
+            self.addCleanup(AGENTTUI.os.environ.__setitem__, "TMUX_PANE", original)
+
+        transport.exists(pane_ref("tmux"))
+
+        self.assertEqual(1, len(runner.calls))
+        self.assertIsNone(
+            transport.addressing_observation()["same_multiplexer_session"]
+        )
+
+    def test_text_is_written_literally_and_framing_only_wraps_the_payload(self) -> None:
+        transport, _runner = self.transport()
+        reference = pane_ref("tmux")
+
+        plain = transport.write_chars_argv(reference, "body")
+        framed = transport.write_chars_argv(reference, "body", paste_framed=True)
+
+        self.assertEqual(
+            ["tmux", "send-keys", "-t", PANE_ID, "-l", "body"], plain
+        )
+        self.assertTrue(framed[-1].startswith(AGENTTUI.BRACKETED_PASTE_START))
+        self.assertTrue(framed[-1].endswith(AGENTTUI.BRACKETED_PASTE_END))
+        # Same verb, same addressing, same command count: only the payload differs.
+        self.assertEqual(plain[:-1], framed[:-1])
+
+    def test_the_submit_key_is_sent_as_the_contract_byte_not_a_key_name(self) -> None:
+        # A key *name* would go through this multiplexer's key encoding, and an
+        # extended-keys configuration can change what Enter looks like on the wire.
+        transport, _runner = self.transport()
+        reference = pane_ref("tmux")
+
+        enter = transport.send_key_argv(reference, AGENTTUI.PANE_ENTER_BYTE)
+        queue = transport.send_key_argv(reference, AGENTTUI.CODEX_PANE_QUEUE_BYTE)
+
+        self.assertEqual(["tmux", "send-keys", "-t", PANE_ID, "-H", "0d"], enter)
+        self.assertEqual("09", queue[-1])
+        self.assertNotIn("Enter", enter)
+
+    def test_a_key_that_is_not_a_byte_is_refused_rather_than_guessed(self) -> None:
+        transport, _runner = self.transport()
+
+        with self.assertRaises(AGENTTUI.RegistryError):
+            transport.send_key_argv(pane_ref("tmux"), "Enter")
+        with self.assertRaises(AGENTTUI.RegistryError):
+            transport.send_key_argv(pane_ref("tmux"), "999")
+
+    def test_an_unavailable_cli_is_refused_before_any_probe(self) -> None:
+        runner = RecordingRunner()
+        transport = AGENTTUI.TmuxTransport(runner=runner, which=lambda _name: None)
+        target = make_record(pane_ref=pane_ref("tmux"))
+
+        with self.assertRaises(AGENTTUI.NoOperationalRoute) as caught:
+            AGENTTUI.build_route(
+                target, "envelope", transports={"tmux": lambda: transport}
+            )
+
+        self.assertEqual("pane-transport-unavailable", caught.exception.reason)
+        self.assertEqual([], runner.calls)
+
+    def test_the_route_takes_its_command_lines_from_this_transport(self) -> None:
+        transport, _runner = self.transport([FakeCompleted(stdout=self.listing())])
+
+        route = AGENTTUI.build_route(
+            make_record(brand="codex", pane_ref=pane_ref("tmux")),
+            "envelope",
+            transports={"tmux": lambda: transport},
+            codex_submit_activity="idle",
+        )
+
+        self.assertEqual(AGENTTUI.ROUTE_PANE, route.mode)
+        self.assertEqual("tmux", route.transport.name)
+        self.assertEqual("send-keys", route.pane_argv()[1])
+        self.assertEqual("0d", route.submit_argv()[-1])
+
+
+class TmuxContractWordingTests(unittest.TestCase):
+    """The measured tmux trap and the rule-5 downgrade must be written down.
+
+    A transport whose readings live only in code is a transport the next person
+    re-derives by experiment -- on someone's real terminal.
+    """
+
+    @staticmethod
+    def guide() -> str:
+        return (ROOT / "overlay/spec/guides/agenttui-registry.md").read_text(
+            encoding="utf-8"
+        )
+
+    def test_the_forbidden_property_read_is_named_in_the_guide(self) -> None:
+        guide = self.guide()
+
+        self.assertIn("display-message -p -t", guide)
+        self.assertIn("list-panes -t", guide)
+
+    def test_the_two_traps_are_stated_as_one_general_lesson(self) -> None:
+        # Each multiplexer has a "most natural property read" command, and that is
+        # exactly the one that falls back silently with rc=0. The point is the
+        # generalisation, not two isolated anecdotes.
+        guide = self.guide()
+
+        self.assertIn("同名命令同语义", guide)
+        self.assertIn("静默回落", guide)
+
+    def test_rule_five_downgrade_is_scoped_to_this_transport_only(self) -> None:
+        guide = self.guide()
+
+        self.assertIn("从**必需**降为**优化**", guide)
+        # And the code must not act on the downgrade: the contract is transport
+        # neutral, and the downgrade holds for one transport only.
+        preflight_source = inspect.getsource(AGENTTUI.build_pane_route)
+        self.assertIn("if preflight:", preflight_source)
+        for transport_name in AGENTTUI.TRANSPORTS:
+            self.assertNotIn(transport_name, preflight_source)
+
+    def test_the_multiplexer_value_domain_in_the_guide_matches_the_registry(self) -> None:
+        guide = self.guide()
+        row = next(
+            line
+            for line in guide.splitlines()
+            if line.startswith("| `pane_ref`")
+        )
+
+        for transport_name in AGENTTUI.TRANSPORTS:
+            self.assertIn(f"`{transport_name}`", row)
+        self.assertIn("整条", row)
+
+    def test_the_tmux_specific_gaps_stay_visible(self) -> None:
+        guide = self.guide()
+
+        # Pane ids are unique within one server, and pane_ref carries no socket.
+        self.assertIn("socket", guide)
+        self.assertIn("attach", guide)
 
 
 if __name__ == "__main__":

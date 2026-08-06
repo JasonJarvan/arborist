@@ -81,6 +81,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   handle in this repo was written by reading it back out of process environment — the very method this gate
   rejects. That value happened to be correct, which is precisely why it must not become precedent; "the
   value was right" and "the method is sound" are different claims.
+- **A second pane transport (`tmux`) that coexists with the existing one, so panes migrate one at a
+  time** (`agenttui.py` `TmuxTransport` + `TRANSPORTS`, `agenttui-registry.md` §2.2 / §3 rule 5 and
+  the new tmux readings table, +27 tests) — this is **not** a migration to tmux: both transports stay
+  registered and `pane_ref.multiplexer` (value domain now `zellij` / `tmux`) picks one, so no flag day
+  is needed. The delivery contract and the routing layer are untouched, which is what ADR-0007's
+  transport neutrality was for: adding a multiplexer is a subclass plus one registry entry, and a
+  mechanical test still pins that no multiplexer name or command appears in routing code. Measured on
+  a private detached server so that no real terminal was touched: `send-keys -t` is genuinely
+  directed — it reaches a pane in another window with the active window and every pane's active flag
+  unchanged and no cross-delivery — so **this transport's existence probe does not have to be a focus
+  command**, which is its substantive advantage over a focus-addressed one. The probe is therefore
+  `list-panes -t` (rc=1 plus `can't find pane:` for a missing target), and one trap is recorded
+  alongside the other transport's screen-dump trap: **`display-message -p -t <missing>` answers rc=0
+  and silently falls back to the *current* pane's attributes**, i.e. a false positive that is harder
+  to doubt than an empty one. Hence the general lesson now written down: every multiplexer has a
+  "most natural property read" command and that is exactly the one that falls back silently with
+  rc=0, so a change of multiplexer requires re-measuring cell by cell rather than assuming a
+  same-named command means the same thing. Verdicts still come from **stdout and stderr joined**, not
+  from the exit code, even though this transport's codes are more trustworthy. Addressing anchors on
+  the pane id (`%N`, documented as unchanged for the pane's life and measured to survive a session
+  rename), which shrinks the rot surface of `pane_ref` — the session name is still cross-checked, so
+  a rename becomes a loud refusal to rebuild the whole handle instead of a silent write into nowhere.
+  Rule 5's pre-flight is contractually **downgraded from necessary to an optimisation on this
+  transport only** (the worst cell — pane gone, rc=0, both streams empty — does not occur here), and
+  deliberately **not** acted on in code: the contract is transport neutral and the downgrade rests on
+  one measurement of one version. Three gaps are listed rather than implied: `pane_ref` has no socket
+  dimension, so only the default tmux server is addressable and a same-name same-id pane on another
+  server would still be a silent mis-delivery; "does not steal focus" is proven at the server's state
+  layer, not against an attached human; and the submit-key bytes have not been verified against a real
+  agent TUI over this transport.
 - **A mechanical tiebreak for cross-repo registry conflicts, because that class has no owner by
   construction** (`agenttui-registry.md` §2.2.1, `validate_agenttui_registry.py`
   `tiebreak_readings`, gate matrix row, +9 tests) — every high-severity conflict found on real data
