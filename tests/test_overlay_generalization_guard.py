@@ -167,6 +167,31 @@ class ThreeGeneralRulesLandedTest(unittest.TestCase):
             registry,
         )
 
+    def test_forensic_command_selfcheck_rule_keeps_its_meta_conclusion(self) -> None:
+        text = self.read("spec/guides/verification-and-gates.md")
+        self.assertIn("### 取证命令本身会出错，而它的错以正常读数的形式呈现", text)
+        # 本节最重要的一句是**元结论**：规则的形式错了，不是内容错了。
+        self.assertIn("它的形式就是错的，不是它的内容", text)
+        self.assertIn("再写一遍是最诱人也最无效的处置", text)
+        # 三条机械产物都必须在；只留告诫就退回纪律形式。
+        self.assertIn("诊断命令不得丢弃 stderr", text)
+        self.assertIn("退出码必须取自被诊断的那条命令", text)
+        self.assertIn("首次跑就得到否定结论时", text)
+        # 同族变体：两步声称做同一件事时要能分别证明。
+        self.assertIn("失效的步骤被有效的步骤掩盖", text)
+
+    def test_sender_side_corruption_signature_was_corrected(self) -> None:
+        registry = self.read("spec/guides/agenttui-registry.md")
+        # 旧签名（文本变短）是错的；新签名必须在，否则分类器会退回比长度。
+        self.assertIn("不是「文本变短」，而是「文本仍自洽，但少了具体值」", registry)
+        # 收信侧检测不出来 ⇒ 校验必须在发送侧。
+        self.assertIn("必须做在发送侧，不能指望收信方发现", registry)
+        # 机械修法必须真的存在，而不是「小心引用」。
+        self.assertIn("--message-file", registry)
+        adapter = (OVERLAY / "scripts" / "agenttui.py").read_text(encoding="utf-8")
+        self.assertIn("--message-file", adapter)
+        self.assertIn("empty message body", adapter)
+
     def test_landed_needs_an_independent_reading(self) -> None:
         text = self.read("spec/guides/verification-and-gates.md")
         self.assertIn("### 状态表里的「已落」必须附一条独立读数", text)

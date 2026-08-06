@@ -2713,7 +2713,35 @@ def create_parser() -> argparse.ArgumentParser:
     send = subparsers.add_parser("send", help="direct-message a registered peer")
     send.add_argument("--from", dest="sender", required=True)
     send.add_argument("--to", dest="target", required=True)
-    send.add_argument("--message", required=True)
+    # `--message` and `--message-file` are deliberately BOTH offered, and the file
+    # form is the one to reach for when the body is anything but a short literal.
+    #
+    # Why this exists as a mechanism rather than as advice: sender-side envelope
+    # corruption has now been observed from two independent senders, and in the
+    # measured case the cause was that BACKTICKS ARE STILL SUBSTITUTED INSIDE
+    # DOUBLE QUOTES -- the shell executed two spans of the body and removed them.
+    # The corrupted message stayed self-consistent (it merely gained two spaces),
+    # the sender did not notice, and the RECEIVER STRUCTURALLY CANNOT NOTICE:
+    # nothing in the delivered bytes says a span used to be there. Advice ("quote
+    # carefully") cannot be the fix for a failure whose only witness is the intent
+    # that was already lost. Taking the shell off the path can.
+    body = send.add_mutually_exclusive_group(required=True)
+    body.add_argument(
+        "--message",
+        help=(
+            "the message body as one argument. Beware: it has already passed "
+            "through your shell by the time this process sees it -- prefer "
+            "--message-file for anything containing backticks, $(...), or newlines"
+        ),
+    )
+    body.add_argument(
+        "--message-file",
+        help=(
+            "read the body from this file, or from stdin when given '-'. The bytes "
+            "never pass through shell quoting, which removes the sender-side "
+            "corruption class rather than warning about it"
+        ),
+    )
     send.add_argument(
         "--timeout",
         type=float,
@@ -3340,7 +3368,7 @@ def command_send(args: argparse.Namespace, repo: Path) -> int:
         repo,
         sender_name=args.sender,
         target_name=args.target,
-        message=args.message,
+        message=resolve_message_body(args),
         nonce=str(uuid.uuid4()),
         script_path=script_path,
         allow_resume=args.allow_resume,
@@ -3434,6 +3462,38 @@ def command_status(args: argparse.Namespace, repo: Path) -> int:
         )
     )
     return 2 if result["diagnostic"] == "declared-stopped-but-transcript-newer" else 0
+
+
+def resolve_message_body(args: argparse.Namespace) -> str:
+    """Return the body, from the literal argument or from a file/stdin.
+
+    Fail-closed on an empty body from either source. An empty body is not a
+    degenerate-but-harmless send: it is the single most likely observable trace of
+    sender-side corruption (the shell consumed the whole span), and a successfully
+    delivered empty envelope is, at the receiver, indistinguishable from a sender
+    who had nothing to say.
+    """
+
+    source = getattr(args, "message_file", None)
+    if source is None:
+        body = args.message
+    elif source == "-":
+        body = sys.stdin.read()
+    else:
+        path = Path(source).expanduser()
+        try:
+            body = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise RegistryError(f"cannot read --message-file {path}: {exc}") from exc
+
+    if not body.strip():
+        raise RegistryError(
+            "refusing to send an empty message body. If you passed --message through "
+            "a shell, an empty body is the most likely observable trace of the body "
+            "having been substituted away (backticks are substituted even inside "
+            "double quotes); use --message-file to keep the shell off the path"
+        )
+    return body
 
 
 def main(argv: list[str] | None = None) -> int:
