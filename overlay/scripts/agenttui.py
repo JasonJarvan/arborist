@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import math
 import os
@@ -200,6 +201,24 @@ OBSERVATION_LOG_DEFAULT = Path.home() / ".arborist" / "focus-intrusion.jsonl"
 # itself the "measurement perturbs the measured system" failure this facility
 # exists to keep honest. It is per-transport state rather than a module global for
 # the same reason -- a global would leak the perturbation across callers.
+
+# Receiver-side submit acknowledgement (rule 8). Two evidence sources answer two
+# *different* questions, and neither subsumes the other:
+#
+#   transcript nonce -> "the envelope reached the session record"  (observer-side)
+#   submit ack       -> "the receiver's submit hook actually fired" (causal)
+#
+# The ack matters most in the one combination the transcript alone cannot read:
+# ack present + nonce absent = submitted, not yet flushed => a resend here would
+# duplicate. That is precisely the case the retry branch below used to walk into.
+#
+# Absence of an ack is NEVER "not submitted": the hook may be uninstalled, may
+# have been skipped by a tracked settings file (see ADOPT.md), or its write may
+# have failed. The fail-safe direction is therefore one-sided -- unconfirmed.
+ACK_STATUS_ACKED = "acked"
+ACK_STATUS_UNCONFIRMED = "unconfirmed"
+ACK_STATUS_UNAVAILABLE = "table-unreadable"
+ACK_MODULE_NAME = "agenttui_submit_ack.py"
 
 ROUTE_PANE = "pane"
 ROUTE_RESUME = "resume"
@@ -2117,6 +2136,64 @@ def pane_result_payload(
     }
 
 
+def read_submit_ack(nonce: str, *, log_path: Path | None = None) -> dict[str, Any]:
+    """Ask the receiver-side ack table about one nonce. Never raises.
+
+    Three outcomes, deliberately distinct: `acked` (the receiver's hook fired),
+    `unconfirmed` (looked, found nothing -- **not** "not submitted"), and
+    `table-unreadable` (could not look at all, which must not be reported as
+    having looked). The distinction is the whole point: "I could not check" and
+    "I checked and it was absent" license different actions.
+
+    A missing ack module is itself `table-unreadable`, not `unconfirmed`: the
+    facility may simply not be adopted here, and that is not evidence about the
+    target's behaviour.
+    """
+    module_path = Path(__file__).resolve().parent / ACK_MODULE_NAME
+    if not module_path.is_file():
+        return {
+            "ack_status": ACK_STATUS_UNAVAILABLE,
+            "ack_count": 0,
+            "ack_detail": (
+                f"{ACK_MODULE_NAME} is not installed next to this script, so the "
+                "ack table could not be consulted; this says nothing about whether "
+                "the target submitted"
+            ),
+        }
+    try:
+        spec = importlib.util.spec_from_file_location("_agenttui_ack", module_path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        records = module.read_acks(nonce) if log_path is None else module.read_acks(
+            nonce, log_path=log_path
+        )
+    except Exception as exc:  # a measurement must never fail a delivery
+        return {
+            "ack_status": ACK_STATUS_UNAVAILABLE,
+            "ack_count": 0,
+            "ack_detail": f"the ack table could not be read ({exc})",
+        }
+    if records:
+        return {
+            "ack_status": ACK_STATUS_ACKED,
+            "ack_count": len(records),
+            "ack_detail": (
+                "the receiver's submit hook fired for this nonce, which is causal "
+                "evidence that the envelope was submitted"
+            ),
+        }
+    return {
+        "ack_status": ACK_STATUS_UNCONFIRMED,
+        "ack_count": 0,
+        "ack_detail": (
+            "no ack for this nonce. This means UNCONFIRMED, not not-submitted: the "
+            "receiver's hook may be uninstalled or skipped, or its write may have "
+            "failed"
+        ),
+    }
+
+
 def send_via_pane(
     route: DeliveryRoute,
     payload: dict[str, Any],
@@ -2144,6 +2221,7 @@ def send_via_pane(
     boundary = transcript_size(session_file)
     target_is_codex = payload["target_brand"] == "codex"
     submit_activity = payload.get("target_submit_activity")
+    ack_reading: dict[str, Any] = {}
 
     def report(
         delivery: str,
@@ -2165,6 +2243,10 @@ def send_via_pane(
             sent=sent,
             submit_rejected=submit_rejected,
         )
+        # Rule 8: report the receiver-side reading alongside the observer-side one.
+        # Reported on every outcome, including success, because the value of the
+        # pair is in their *combination* -- see the ack/nonce matrix in section 3.
+        result.update(ack_reading)
         warning = PANE_OUTCOME_WARNINGS.get(delivery)
         if warning is not None:
             print(f"warning: {warning}", file=sys.stderr)
@@ -2271,10 +2353,19 @@ def send_via_pane(
     delivered = wait_for_transcript_marker(
         session_file, payload["delivery_marker"], boundary, verify_window
     )
+    ack_reading = read_submit_ack(payload["nonce"])
     if delivered:
         return report(DELIVERY_DELIVERED, submit_action=submit_action, delivered=True)
     if enqueued_for_next_turn:
         return report(DELIVERY_QUEUED_FOR_NEXT_TURN, submit_action=submit_action)
+
+    # The one combination the transcript alone cannot read: the receiver's hook
+    # fired (so the envelope *was* submitted) but the record has not surfaced yet.
+    # Pressing submit again here would duplicate an accepted message -- which is
+    # precisely what the old code did, because it could not tell this apart from
+    # "never submitted". This is the whole reason the ack exists.
+    if ack_reading["ack_status"] == ACK_STATUS_ACKED:
+        return report(DELIVERY_SUBMIT_UNVERIFIED, submit_action=submit_action)
 
     time.sleep(max(submit_delay, PANE_VERIFY_POLL_INITIAL_SECONDS))
     if target_is_codex:
@@ -2304,6 +2395,9 @@ def send_via_pane(
     delivered = wait_for_transcript_marker(
         session_file, payload["delivery_marker"], boundary, verify_window
     )
+    # Re-read: an ack may have landed during the retry, and reporting the stale
+    # reading would understate what is known.
+    ack_reading = read_submit_ack(payload["nonce"])
     if delivered:
         return report(DELIVERY_DELIVERED, submit_action=submit_action, delivered=True)
     return report(DELIVERY_SUBMIT_UNVERIFIED, submit_action=submit_action)
