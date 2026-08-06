@@ -70,9 +70,28 @@ PROTOCOL = "ARBORIST-DIRECT:v1"
 # readers must tolerate unknown versions by skipping, never by guessing.
 ACK_RECORD_VERSION = 1
 
+ARBORIST_HOME_ENV = "ARBORIST_HOME"
+
+
+def arborist_home() -> Path:
+    """The machine-level Arborist root: `$ARBORIST_HOME`, else `~/.arborist`.
+
+    Unset **and** empty both resolve to `~/.arborist` (an empty string is how a
+    shell spells "not configured"; treating it as a root would resolve against the
+    process cwd). Read once, at import, so a caller cannot end up with a half-moved
+    set of derived paths. Mirrors the resolver in `agenttui.py`; a test pins both to
+    the same answers.
+    """
+
+    override = os.environ.get(ARBORIST_HOME_ENV)
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".arborist"
+
+
 # Global on purpose -- see the module docstring ("TABLE SHAPE"). Sits next to the
 # focus-intrusion log so the runtime surface stays in one place.
-ACK_LOG_DEFAULT = Path.home() / ".arborist" / "submit-acks.jsonl"
+ACK_LOG_DEFAULT = arborist_home() / "submit-acks.jsonl"
 
 # Same nonce alphabet as the sender's envelope builder. Kept strict so a stray
 # word in the submitted text cannot be read as a nonce.

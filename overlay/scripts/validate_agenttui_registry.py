@@ -118,6 +118,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 from collections import defaultdict
@@ -125,7 +126,29 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, NamedTuple, Sequence
 
-DEFAULT_GLOBAL_INDEX = Path.home() / ".arborist" / "index.json"
+ARBORIST_HOME_ENV = "ARBORIST_HOME"
+
+
+def arborist_home() -> Path:
+    """The machine-level Arborist root: `$ARBORIST_HOME`, else `~/.arborist`.
+
+    Unset **and** empty both resolve to `~/.arborist` (an empty string is how a
+    shell spells "not configured"; treating it as a root would resolve against the
+    process cwd). Read once, at import. Mirrors the resolver in `agenttui.py`; a
+    test pins both to the same answers.
+
+    Why a validator needs it at all: without an override, every rehearsal of a
+    migration that touches the global root has to be rehearsed **on** the one real
+    global root, which is not a rehearsal.
+    """
+
+    override = os.environ.get(ARBORIST_HOME_ENV)
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".arborist"
+
+
+DEFAULT_GLOBAL_INDEX = arborist_home() / "index.json"
 
 AGENTS_RELATIVE = Path(".arborist/agents")
 SPEC_NAME = "spec.json"
@@ -1078,7 +1101,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--global-index",
         type=Path,
         default=DEFAULT_GLOBAL_INDEX,
-        help=f"global registry index (default: {DEFAULT_GLOBAL_INDEX})",
+        help=(
+            f"global registry index (default: {DEFAULT_GLOBAL_INDEX}; the root is "
+            f"${ARBORIST_HOME_ENV} when that is set to a non-empty value)"
+        ),
     )
     parser.add_argument(
         "--project",

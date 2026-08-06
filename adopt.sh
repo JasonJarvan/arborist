@@ -81,11 +81,22 @@ cp "$SRC/scripts/agenttui_submit_ack.py" "$ROOT/.trellis/scripts/"; chmod +x "$R
 #                                      （fail closed）。它按给定路径工作，不推仓根。
 # 前三个靠 __file__.parents[2] 定位 repo root，须放 .trellis/scripts/（两级深）；
 # 该目录整面已在 overlay/scripts/hgit 的 SNAPSHOT_PATHS 与侧史 allowlist 里，无需另加条目。
+#   validate_overlay_drift.py       —— 本仓 overlay 与上游 pin 的落后/漂移三态报告
+#                                      （behind / drifted / intentional 分开报；只报告不阻塞，
+#                                      provenance 缺失 fail closed）。只读、无 --fix。
 for validator in validate_adr_numbers.py validate_harness_persistence.py validate_claim_provenance.py \
-                 validate_agenttui_registry.py validate_tool_entry_forms.py; do
+                 validate_agenttui_registry.py validate_tool_entry_forms.py \
+                 validate_overlay_drift.py; do
   cp "$SRC/scripts/$validator" "$ROOT/.trellis/scripts/"
   chmod +x "$ROOT/.trellis/scripts/$validator"
 done
+# 分级判定 + provenance 记录：前者是「某制品属全局还是项目级」的机械判据（搬仓不变式），
+# 后者按它的铺设面清单记下「本仓 overlay 停在哪个上游 commit + 各文件摘要」。两者与上面
+# validate_overlay_drift.py 是一套：判据定面 → provenance 定基线 → validator 报落后。
+# 都靠同级目录互相发现（provenance 读 classify_tier 的清单、drift validator 读两者），故同放
+# .trellis/scripts/。
+cp "$SRC/scripts/classify_tier.py" "$ROOT/.trellis/scripts/"; chmod +x "$ROOT/.trellis/scripts/classify_tier.py"
+cp "$SRC/scripts/arborist_provenance.py" "$ROOT/.trellis/scripts/"; chmod +x "$ROOT/.trellis/scripts/arborist_provenance.py"
 
 echo "→ 铺 .work_context 模板（不覆盖已存在）"
 mkdir -p "$ROOT/.work_context"
@@ -172,6 +183,28 @@ grep -q '^/\.trellis$' "$EXC" 2>/dev/null || cat >> "$EXC" <<'EOF'
 /.claude
 /docs
 EOF
+
+# overlay provenance：记下「本仓 overlay 停在哪个上游 commit + 铺设面各文件摘要」。
+# 为什么必须有：overlay 是按【拷贝】铺进各仓的，而「每仓内容本应相同」的东西拷 N 份必然漂移
+# —— 这不是风险假设而是实测事实，且已经发生过「第一轮追平、第二轮又拉开」。没有机械落后读数，
+# 「同步」就是荣誉制。本文件是那个读数的【基线】，validate_overlay_drift.py 是读数本身。
+#
+# 三段门（照 spec/guides/verification-and-gates.md「预防 > 检测 > 判断」）：
+#   预防 —— adopt 时必写 provenance（就是这一步）；缺它则 adopt 不算完成（下面 --check 大声报）
+#   检测 —— 各仓 gardener 在 session 起手跑 validate_overlay_drift.py；全机巡检 --all 归 arborist.gardener
+#   判断 —— 报出 behind 之后，由该仓 gardener 决定收敛，或在 local_modifications[] 里具名声明
+#
+# 写失败【不中断 adopt】：它是新增能力，不是既有流程的前置。一个仓因为记不上台账就没铺成
+# overlay，比铺成了但没台账更糟。照上面 required 依赖检查的先例：大声说，不中断。
+echo "→ 记 overlay provenance（上游 commit + 铺设面摘要）"
+if ! python3 "$SRC/scripts/arborist_provenance.py" \
+       --repo "$ROOT" \
+       --upstream-tree "$ARBORIST_ROOT" \
+       --adopt-script "$0"; then
+  echo "  ✗✗ provenance 未写成 —— overlay 已铺好，但本仓【没有落后基线】"
+  echo "     后果：drift 检测对本仓一律 fail closed（缺基线不得当成「已同步」）。"
+  echo "     补写：python3 $ROOT/.trellis/scripts/arborist_provenance.py --repo $ROOT --upstream-tree $ARBORIST_ROOT"
+fi
 
 echo "→ 建本地 harness 版本仓 .harness-vcs（无 remote）"
 HVCS_MARK_BEGIN="# >>> Arborist harness-vcs allowlist（勿手改块内；块外自加条目会被保留）>>>"
@@ -419,6 +452,12 @@ offer_tool codegraph  '`codegraph init && codegraph install`' '无符号图谱 M
 # tool.json 模板随 arborist-templates/tools 递归铺），无外部安装步骤 —— 与 agenttui 同先例。
 # offer_tool 用 command -v 探 PATH 二进制，对随附脚本会误报「未安装」，故不用。
 
+# 完成判据（不是装饰）：缺 provenance ⇒ 本仓的落后关系不可读 ⇒ adopt 不算完成。
+# 只报告、不 exit 1：overlay 本身已铺好，把 adopt 判成失败会诱使人重跑而不是补台账。
+echo "→ 验 provenance 就位（adopt 的完成判据）"
+python3 "$SRC/scripts/arborist_provenance.py" --repo "$ROOT" --check || \
+  echo "  ✗✗ adopt 未完成：本仓没有落后基线。补写命令见上。"
+
 cat <<'NEXT'
 
 ✓ overlay 已叠加。手动收尾：
@@ -441,4 +480,10 @@ cat <<'NEXT'
   7) 重启 AI session。harness 改动走 ./hgit（log/diff/checkout 回退）；落定用
      `./hgit snapshot --dry-run` 复核后 `./hgit snapshot && ./hgit commit -m "..."`
      —— snapshot 按显式 durable 白名单暂存并剔掉凭证/缓存/备份，不依赖 untracked 可见性。
+  7) 本仓与上游 overlay 的落后关系已可读（不再是荣誉制）。session 起手跑一次：
+       python3 .trellis/scripts/validate_overlay_drift.py --repo .
+     它只报告、不阻塞。报出 behind ⇒ 由本仓 gardener 决定收敛；本仓故意改了某个 overlay 文件
+     ⇒ 在 .arborist/overlay-provenance.json 的 local_modifications[] 里具名声明
+     （必须带 reason + decided_by），validator 会把它报成 intentional 而不是静默放过。
+     判据本身可复算：python3 .trellis/scripts/classify_tier.py --repo . （只读）
 NEXT
