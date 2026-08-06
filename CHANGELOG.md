@@ -61,6 +61,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   target's reply appears) nor cleaned up while the runner is still writing; the path is reported instead.
 
 ### Added
+- **Pane self-identification gate, restored from a downstream adopter's history where it had been lost**
+  (`agenttui-registry.md` §5.0, gate-matrix row) — self-registration has to fill a pane handle, and the most
+  natural way for a session to answer "which pane am I in" is to read the multiplexer's injected environment
+  variables. That method is **unreliable and fails silently**: two real misidentifications were measured —
+  once claiming *someone else's* pane, once **inheriting the sender's** pane during a headless turn. A wrong
+  pane handle raises no error; it just makes later deliveries land in an unrelated session. The gate makes
+  the environment variable a **lead requiring corroboration**, never proof of identity: a second independent
+  reading (the pane's running command and working directory, compared against the identity and cwd the
+  session claims) must agree, and contradiction / a candidate pane already held by another live leaf / only
+  the outer handle being visible under nesting all **fail closed**. The section states explicitly why this
+  cannot be replaced by the post-write uniqueness checks and why both must coexist: uniqueness can only
+  notice a conflict **after both leaves are written**, and it never notices a one-sided misidentification at
+  all — so uniqueness alone means alerting only after the pollution exists, with a whole failure class
+  invisible. Directly relevant to the nested launcher shape now under evaluation: under nesting the **inner**
+  handle must be recorded, and only after a nonce-verified directed injection proves that handle reaches this
+  TUI — filling in the outer handle because it is the one exposed is the exact case the gate forbids, and is
+  how both measured misidentifications happened. One past violation is kept on record de-personalised: a
+  handle in this repo was written by reading it back out of process environment — the very method this gate
+  rejects. That value happened to be correct, which is precisely why it must not become precedent; "the
+  value was right" and "the method is sound" are different claims.
 - **A mechanical tiebreak for cross-repo registry conflicts, because that class has no owner by
   construction** (`agenttui-registry.md` §2.2.1, `validate_agenttui_registry.py`
   `tiebreak_readings`, gate matrix row, +9 tests) — every high-severity conflict found on real data
