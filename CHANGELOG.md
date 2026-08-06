@@ -576,6 +576,41 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   has permanent work, and every finding it reports was avoidable.
 
 ### Fixed
+- **Shape 3 splits into 3a/3b — measurement overturned half of its attribution** (`agenttui-registry.md` §3)
+  — two long-envelope deliveries to different targets produced an identical signature: text in the composer,
+  composer not cleared, no credential error, nothing in the transcript. Under the old single row that reads as
+  "long text corrupted". **But re-sending the submit key once succeeded both times, and the text was intact
+  character for character.** The controlled variables say what actually differed: the first attempt used the
+  *wrong* submit key and was corrected about a minute later (success); the second used the *right* key but
+  only about a second after the write (failure), then succeeded on a second identical key. So the shared
+  variable behind both failures is **neither the key nor text integrity — it is the interval between writing
+  and submitting**: the composer had not finished consuming a long paste when the key arrived, so the key was
+  swallowed into the paste stream or ignored. The two now split as **3a** (text on screen *with missing
+  characters*) and **3b** (text on screen *byte-identical* yet unsubmitted) — telling them apart is just
+  "are characters missing" — because their fixes differ: atomic delivery versus waiting for composer
+  readiness. And 3b's fix is explicitly **not** "raise the submit-delay constant": that is the class of fix a
+  later reader optimises away. The required shape is to **wait on an observable signal** — poll the screen
+  until the envelope's trailing characters appear, then submit — turning "have I waited enough" from a timer
+  into a criterion, the same move as the ack: replace the sender's estimate with evidence the observed side
+  produced. Recorded as a *pending* inference rather than a conclusion: atomic delivery probably eases both,
+  but atomicity guarantees one write call, not that the terminal finished processing it, so it may only
+  narrow the window — the readiness criterion stays as the backstop.
+- **The shipped adapter cannot deliver across projects, which silently voids the entire contract for that
+  whole class of delivery** (`agenttui-registry.md` §3 gap list) — leaf lookup is scoped to a single
+  repository and the repository root is a single-valued parameter, so sender and target must share a repo. The
+  global index *does* carry each project's path, so cross-project addressing is available in the data; the
+  adapter simply does not use it. The consequence is not a missing convenience but a systematic bypass: a
+  cross-project delivery can only be done by hand, and a hand-made injection skips **every** contract rule —
+  existence preflight, capability check, the outcome model, ack consumption, framed writes, the widened
+  verification window, focus-theft recording. Every hardening added today is inert there. The attribution is
+  spelled out because it decides the fix: in one measured cross-project attempt the sender used the enqueue
+  key on an idle target, violating the routing rule — and filing that as *someone's routing mistake* is the
+  wrong reading, because a hand injector **must re-implement routing itself** (liveness, per-brand keys,
+  interval, verification), and the odds of getting six contract rules right by hand at the keyboard are low.
+  **Errors of this kind are products of the gap, not of carelessness** — filed as carelessness, the next
+  person repeats it; filed as a gap, the gap gets closed. The general form is one step past "a gate with no
+  enforcer is decoration": **a contract that is implemented but unusable for an entire class of case
+  degenerates into decoration for that class — silently, because the caller cannot see what they bypassed.**
 - **Shape 6 splits in two with opposite handling, and the launch invariant written one commit earlier had a
   logical hole** (`agenttui-registry.md` §3) — continuing the same measurement: the pane later showed the
   self-update had finished but the CLI **required a manual restart and would not start itself**. At that
