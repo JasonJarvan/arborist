@@ -1,0 +1,19 @@
+{
+  "name": "agenttui-direct",
+  "description": "AgentTUI 注册表寻址、跨 brand 瞬态直投、回复信封与 guarded runtime 心跳/停止 —— 全局单份权威入口形态（一台机器一份能力，各仓经 --repo 指明调用方仓根）。",
+  "kind": "cli",
+  "invoke": {
+    "cli": "\"${ARBORIST_HOME:-$HOME/.arborist}/bin/agenttui\" --repo <CALLER_REPO_ROOT> {status|send|heartbeat|stop} --help"
+  },
+  "scope": "global",
+  "requirement": "required",
+  "install": "随 Arborist/Trellis harness 下发。全局入口 = <ARBORIST_HOME>/bin/<shim>，指向单份权威脚本；shim 由 gardener 铺设，并须导出 ARBORIST_ENTRY_FORM=global-authority。无需另装 Python 依赖；目标 brand 自己的 CLI 必须已安装并登录。",
+  "fallback": "全局入口不可用时退回本仓 adopted copy（`python3 .trellis/scripts/agenttui.py`，那一形态按脚本位置推导仓根，无需 --repo）。两者都不可用时，durable 消息先写目标专属 sendbox；只有已确认 stopped 的目标才按 actual brand 手工 resume；active Codex 无可寻址 pane 时 fail closed。不得猜 brand。",
+  "availability": "\"${ARBORIST_HOME:-$HOME/.arborist}/bin/agenttui\" --help —— 探测的必须是本条 `invoke` 用的**同一个入口形态**：拿项目副本探测再教人调全局入口（或反之）会把一个不存在的入口报成可用。缺 shim / shim 指向的权威脚本不在 → shim 自己非零退出并说明，不静默回落到任何副本。",
+  "auth": "沿用目标 CLI 已有本机登录；信封来源仅声明、不构成鉴权；凭据不入注册表",
+  "notes": "**全局入口必须显式 `--repo <调用方仓根>`**：全局单份脚本无从知道谁在调它，按 `__file__` 推导只会得到**承载权威脚本的那个仓**——那不是调用方仓。缺 `--repo` 时本入口在读取任何仓状态之前拒绝（专用退出码 5），理由见 spec/guides/agenttui-registry.md §2.2.1「误投比不可达严重」：一个能被看见的失败恒优于一个看不见的成功。项目内 adopted copy **不**受此限（那里 `__file__` 确实在调用方仓内，推导正确）——区分点是**入口形态**，由 `ARBORIST_ENTRY_FORM` 显式声明，未声明时退回结构判据（脚本是否真的位于 `.trellis/scripts/`），判不准即要求显式 `--repo`。发出的信封 `reply_command` 会携带本次已解析的 `--repo`，回复方不再重新推导。其余投递语义（送达证据等级、pane preflight、no-operational-route、submit-ack）与项目副本形态逐字相同，见 agenttui-registry.md §3 与项目级条目模板。",
+  "known_limits": [
+    "入口形态判定依赖 shim 导出 ARBORIST_ENTRY_FORM：未导出时靠结构判据兜底（脚本不在 .trellis/scripts/ ⇒ 要求 --repo），方向安全但错误信息不如显式声明清楚 → gardener 铺 shim 时应一并导出该变量",
+    "`--repo` 的值是否真是**调用方**仓，脚本无法核实：它只能核实那是一个项目仓（含 .trellis/ 或 .git/）→ 传错仓名仍会打到错仓，只是不再**静默**发生"
+  ]
+}

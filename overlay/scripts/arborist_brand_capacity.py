@@ -23,7 +23,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 
 # Two levels deep: adopted at <repo>/.trellis/scripts/, so parents[2] is the
@@ -77,15 +77,88 @@ def infer_repo_root(script_path: Path) -> Path:
     return script_path.resolve().parents[2]
 
 
+# --- Entry form: which copy of this script is running ------------------------
+# Same two forms, same opposite defaults, and the same rationale as in
+# agenttui.py (kept duplicated on purpose: both scripts are standalone,
+# stdlib-only, and shipped independently).
+#
+# This script's stakes are HIGHER than the messaging adapter's. There the
+# wrong-repo run tended to die later on a missing registry entry; here `status`
+# on the wrong repository returns rc=0 with a perfectly well-formed snapshot of
+# somebody else's observations. Observed, not hypothesised: a global-entry
+# `status` without --repo answered with the authority host's snapshot and the
+# caller had no way to notice.
+ENTRY_FORM_ENV = "ARBORIST_ENTRY_FORM"
+ENTRY_FORM_GLOBAL = "global-authority"
+ENTRY_FORM_PROJECT = "project-copy"
+ENTRY_FORM_UNKNOWN = "unknown"
+ENTRY_FORMS = (ENTRY_FORM_GLOBAL, ENTRY_FORM_PROJECT)
+# The precondition infer_repo_root() is built on: <repo>/.trellis/scripts/<x>.
+ADOPTED_SCRIPT_ANCESTRY = ("scripts", ".trellis")
+
+
+def classify_entry_form(
+    script_path: Path,
+    env: Mapping[str, str] | None = None,
+) -> tuple[str, str]:
+    """Return ``(entry_form, evidence)``; never guesses in the unsafe direction.
+
+    Declared signal beats structure; an unrecognised declared value is
+    ``unknown``, not a fallback to structure — a typo must not silently re-enable
+    the inference.
+    """
+    environ = os.environ if env is None else env
+    declared = environ.get(ENTRY_FORM_ENV)
+    if declared:
+        if declared in ENTRY_FORMS:
+            return declared, f"{ENTRY_FORM_ENV}={declared}"
+        return (
+            ENTRY_FORM_UNKNOWN,
+            f"{ENTRY_FORM_ENV}={declared!r} is not one of {', '.join(ENTRY_FORMS)}",
+        )
+    resolved = script_path.resolve()
+    ancestry = tuple(parent.name for parent in resolved.parents[:2])
+    if ancestry == ADOPTED_SCRIPT_ANCESTRY:
+        return (
+            ENTRY_FORM_PROJECT,
+            f"{ENTRY_FORM_ENV} unset; this script sits at the adopted location "
+            f".trellis/scripts/{resolved.name}, so its repo-root inference holds",
+        )
+    return (
+        ENTRY_FORM_UNKNOWN,
+        f"{ENTRY_FORM_ENV} unset and this script does not sit at "
+        f".trellis/scripts/{resolved.name}, so its repo-root inference has no basis",
+    )
+
+
 def resolve_repo_root(candidate: Path | None) -> Path:
     """Fail closed unless the derived path really is a project repository.
 
-    This gate creates nothing. State, reports and the lock all live under the
-    derived root, and every one of those writers would happily `mkdir -p` its
-    parents — which is precisely how a mis-derived root becomes invisible: the
-    wrong location ends up looking like it had always been there.
+    Two independent refusals, in order:
+
+    1. **Whose repository is this?** Without ``--repo`` the answer only exists
+       for an adopted project copy. Every subcommand here touches project state
+       (config, snapshot, reports, lock all live under the root), so there is no
+       exemption list to keep — ``--help`` is exempt only because argparse
+       handles it before this runs.
+    2. **Is the derived path a repository at all?** This gate creates nothing.
+       State, reports and the lock all live under the derived root, and every one
+       of those writers would happily `mkdir -p` its parents — which is precisely
+       how a mis-derived root becomes invisible: the wrong location ends up
+       looking like it had always been there.
     """
     explicit = candidate is not None
+    if not explicit:
+        form, evidence = classify_entry_form(Path(__file__))
+        if form != ENTRY_FORM_PROJECT:
+            raise CapacityError(
+                "refusing to infer the caller's repository root: entry form is "
+                f"{form!r} ({evidence}). A global entry point must be "
+                "told the caller's repo root explicitly — pass --repo <caller "
+                "repo root>. Nothing was read and nothing was written: inferring "
+                "here would report the snapshot of the repository that hosts "
+                "this script, with rc=0 and no way for you to notice"
+            )
     resolved = (candidate if explicit else infer_repo_root(Path(__file__))).expanduser()
     resolved = resolved.resolve() if resolved.exists() else resolved.absolute()
     source = "--repo" if explicit else "path inferred from this script's location"
@@ -752,10 +825,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "project repository root (default: inferred from this script's "
-            "location, then validated — the inferred path must itself contain "
-            f"{' or '.join(marker + '/' for marker in REPO_MARKERS)}, otherwise "
-            "the run is refused instead of creating capacity state somewhere else)"
+            "project repository root. REQUIRED when running through a global "
+            "entry point (shim): a machine-wide copy cannot know which repository "
+            "is calling it, and inferring would report the snapshot of the "
+            "repository that hosts the script. Only an adopted copy at "
+            ".trellis/scripts/ may omit it; the inferred path is still validated "
+            f"(must contain {' or '.join(marker + '/' for marker in REPO_MARKERS)}"
+            ") instead of creating capacity state somewhere else"
         ),
     )
     parser.add_argument(
