@@ -219,7 +219,11 @@ overlay 的 `validate_harness_persistence.py` 能对**具名路径**验出 `path
 
 ⇒ **denylist → allowlist 的转换，只有在配套那半也做了时才算做完。** 只把清单反过来写、批准仍要走一轮人工审，等于把「静默漏放」换成了「系统性绕过」——后者的读数还更好看（门显示为通过）。
 
-> **待落条目（本节只登记落点与约束，不视为已落）**：**allowlist 条目必须写 `scope`。** 否则一条**单点授权**会被后来者读成**通则**（真实形态：一条「这一个文件、这两个 git 面」的授权，被读成「这类文件都可以」）。落点是**本节**，但**必须与它所守护的那个凭据门实现同时落地**——规则与 allowlist 分开落会丢一半：规则先落 ⇒ 无执行者的装饰；实现先落 ⇒ 无 `scope` 的授权已成既成事实，之后再补要逐条回溯授权范围，而当时的意图已不可考。
+> **allowlist 条目必须写 `scope`（已落，执行者具名）**：否则一条**单点授权**会被后来者读成**通则**（形态：一条「这一个文件、这几个 git 面」的授权，被读成「这类文件都可以」）——**授权不外推**。
+>
+> **执行者**：`hook-templates/credential-gate/pre-commit`（侧史 pre-commit 凭据门）。条目格式 `<路径>  # approver=<谁> date=<YYYY-MM-DD> scope=<授权范围> why=<理由/出处>`，**四段缺一不可，且不接受占位值**；缺任一段 ⇒ 该条目**不生效**且该次提交**按 fail-closed 被拒**，并报出第几行缺哪个字段。
+>
+> **为什么不是「静默忽略这一条」**：静默忽略会让写它的人以为豁免已生效，下一次真提交才发现门还在拦——或者更糟，以为门坏了而去绕过它。**为什么规则与实现必须同时落**：规则先落 ⇒ 无执行者的装饰；实现先落 ⇒ 无 `scope` 的授权已成既成事实，之后再补要逐条回溯授权范围，而当时的意图已不可考。
 
 ## 验证 lens（多镜头）
 
@@ -266,6 +270,7 @@ overlay 的 `validate_harness_persistence.py` 能对**具名路径**验出 `path
 | **临时 / 共享资源生命周期** | 创建、发布路径、开始消费、rotate/revoke/删除**任一**时刻；close-out 必答 | auto-judge | landing manifest 必须写 `N/A（本次未创建/发布/消费/清理）`，或逐资源给出**不含 secret** 的 owner / consumer / 权限 / 硬到期（或 managed 提升）/ 清理前「消费者为零」证据 |
 | **AgentTUI pane 自识别（写入前）** | **自登记写 `pane_ref` 之前**；任何**嵌套复用器**或 headless/app-server 轮次中**每次**都要答 | auto-judge | 复用器环境变量只作**待证线索**，须有**独立第二条证据**（该 pane 的运行命令 + 工作目录与本会话声称的身份/cwd 比对）；矛盾 / 候选 pane 已被另一活体 leaf 持有 / 仅暴露外层 pane 且未证明其转发 ⇒ **fail closed，不登记**；取不到 command/cwd 时只能**降级登记**且必须记录降级。**与写入后的唯一性检查并存、互不替代** —— 后者只在两条 leaf 都写完后才能发现冲突，且漏掉单边错认。规则见 [`agenttui-registry`](./agenttui-registry.md) §5.0 |
 | **AgentTUI 注册表一致性** | gardener 周期性维护时；**任何 GC / 批量注册表改动的前与后**各一次 | auto | `python3 .trellis/scripts/validate_agenttui_registry.py`（六检查：`session_id` 全局唯一〔不受有效态限定〕、`pane_ref` 四元组唯一〔含 `socket`，缺省归一化为默认 server；**只在有效态可达的 leaf 之间**——pane 会被顺序复用，非可达却带 `pane_ref` 的另作 `stale-addressing-handle` **warning**、不计入冲突〕、half-registered 两方向、leaf `project` 字段自洽含 `project_id` 重算、index 摘要与 leaf 一致以 leaf 为准）逐条列出冲突双方**具体路径**；退出码 `0/1/2`，全局 index 缺失或非法 JSON **exit 2 fail closed**，低危 warning 印在单独分节且不影响退出码。改动前后两次均须记入 landing manifest。**纯只读、无 `--fix`、不执行任何外部命令**——跨项目删别人 leaf 属别的 lane。**跨仓冲突（实测两类高危发现全部跨仓）按构造没有 owner**：`duplicate-session-id` / `pane-ref-conflict` 的输出自带**裁定所需读数**（每个声称方的路径 + `session_id`/`session_file`/`state`/`last_seen`/`pane_ref`），裁定按固定优先级（真实 cwd > `session_file` 归属 > `last_seen`）**在全局一次做出**、产物是一条**具名裁定**发给被判错那条所属 lane；优先级最高的「pane 真实 cwd」**不自动取**（取它只能用会抢焦点的聚焦命令，按本篇「新增的观测动作必须先证明它不扰动被观测者」不得藏进批量执行的 validator），固定报 `unknown` + 理由。另有 `--print-project-id <repo>` 供自登记写入路径**计算**而非手抄该派生值（非目录即 exit 2）。规则语义见 [`agenttui-registry`](./agenttui-registry.md) §2.2.1 / §2.3 / §4 / §5 第 4 点 |
+| **凭据不进 harness 侧史** | **每一次侧史 commit**（机械触发，不靠人记得；本行的必答时刻由 hook 承担，人只在被拒时答「移出索引 / 登记 allowlist / `--no-verify`」）| auto | `hook-templates/credential-gate/pre-commit`：按**分类**判（摘要 / 按设计可公开的 key / 占位符不算秘密；**路径形态不参与判决**），全程 fail-closed（拿不准即拒）。豁免走 `$GIT_DIR/allowed-credentials`，一行一条、**四段 `approver`/`date`/`scope`/`why` 缺一即拒**（见[上文](#allowlist-over-denylist通则门问的是谁批准了不是它有什么问题)）。**ignore 类机制在 `add -f` 面前全部失效**，故这一层不可替代；**装完须端到端验证**（真跑一次 commit，看 `rc≠0` 且提交未产生），只 `import` 分类函数的回归**不算验过这个门**（[上文](#门的回归必须端到端且测试的结构必须与真实调用路径同构)实例 (i)）|
 | HITL 晋升（ADR/spec 落盘）| close-out | HITL（L4/human）| **landing manifest（无条件产出，含为空）** ＋ 前置 Challenge-before-ack |
 
 **代码评审这一行是本矩阵的要点**：评审此前只出现在下面「代码评审」叙述与工具表里，流程里**没有任何一步会强制到达「评审跑了没」这个问题**——于是执行可以既不跑评审、也不记 skip，因为没有一个必答的时刻。补上这一行后，收尾**必然**撞到「跑它 or 记 skip」，而答案就落在同一个 close-out 的 landing manifest 里（评审者姓名，或显式的 `nobody reviewed this`），一眼可审。

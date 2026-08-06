@@ -190,8 +190,14 @@ class ThreeGeneralRulesLandedTest(unittest.TestCase):
         self.assertIn("两个互不相关的问题域各自独立到达同一结论", text)
         # 配套那半是必要条件；只留前半会造出一个被绕过的门。
         self.assertIn("**allowlist 必须让「批准」便宜。**", text)
-        # `scope` 只登记落点、不视为已落。
+        # `scope` 已落，且**必须**与它的执行者同在：规则先落是装饰，实现先落则
+        # 无 scope 的授权已成既成事实。删掉任一半都会在这里当场失败。
         self.assertIn("allowlist 条目必须写 `scope`", text)
+        self.assertIn("hook-templates/credential-gate/pre-commit", text)
+        self.assertTrue(
+            (OVERLAY / "hook-templates/credential-gate/pre-commit").exists(),
+            "guide 指名了执行者，但那个执行者不在 —— 规则退化成装饰",
+        )
 
 
 if __name__ == "__main__":
