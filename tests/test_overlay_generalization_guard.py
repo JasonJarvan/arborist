@@ -167,6 +167,19 @@ class ThreeGeneralRulesLandedTest(unittest.TestCase):
             registry,
         )
 
+    def test_landed_needs_an_independent_reading(self) -> None:
+        text = self.read("spec/guides/verification-and-gates.md")
+        self.assertIn("### 状态表里的「已落」必须附一条独立读数", text)
+        # 证据是「同一天两个方向」；删掉它就退化成一个案例，而单向案例读起来
+        # 像是某一方不可靠，而非信道不可靠。
+        self.assertIn("同一天里两个方向都发生了", text)
+        # fail-safe 方向单侧，且理由（假 ✅ 让该项从视野消失）必须留着。
+        self.assertIn("判不准时不标「已落」", text)
+        # 机械产物：不接受 owner 自报。
+        self.assertIn("必须同格附一条读表方自己能复核的读数", text)
+        # 语言侧那一半：只修读表侧修不掉。
+        self.assertIn("已排入,未落", text)
+
     def test_transient_carrier_rule_has_executor_and_failsafe_direction(self) -> None:
         text = self.read("spec/guides/verification-and-gates.md")
         self.assertIn("### transient 载体销毁前必须抽取判据", text)

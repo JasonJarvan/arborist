@@ -36,6 +36,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   deliberately, since syncing would hide the rot.
 
 ### Added
+- **A status table's "landed" cell must carry an independent reading** (`verification-and-gates.md`) —
+  cross-session work allocates attention through status tables (gap queues, dashboards, ledgers,
+  progress letters), and a cell marked done normally originates from the OWNER'S OWN REPORT while the
+  reader holds no second piece of evidence. Measured in **both directions on the same day**: one
+  OVER-report, where a progress letter's "I am landing it the way you ruled" (a statement of PLAN) was
+  read as completion and ticked; and one UNDER-report, where a correction letter wrote "the only things
+  landed are X and Y", turning a partial list into a completeness claim and omitting a third item that
+  was in fact already merged. So the faulty thing is not either party but **the self-report channel,
+  which errs in both directions** — and this is where the rule departs from the "when a reading
+  conflicts with the narration, doubt the narration" family: those assume a reading EXISTS to conflict;
+  here there is no reading at all, only narration, so there is nothing to conflict. What is missing is
+  not suspicion but **a gate that forbids marking something landed with no reading**. The costs are
+  asymmetric, so the fail-safe is one-sided: a false "landed" makes the item **disappear from
+  everyone's view** (nobody does it and nobody asks again), whereas an omission **gets raised again**
+  because it is still on the open list ⇒ **when unsure, do not mark it landed.** Mechanical product:
+  the cell must carry a reading the reader can check for themselves — commit id, grep hit, file
+  existence, test count — and "the owner says so" / "it was merged" / "it was delivered" is not
+  accepted as the sole basis. Deliberately kept one level BELOW "an artifact landing is not a path
+  taking effect": that rule says the artifact is there but the path may not be live; this one says the
+  artifact may not even be there while the table already shows a tick. Also carries the language half,
+  because the reader-side gate alone cannot fix it: a progress letter must not describe unfinished work
+  in wording that reads as completed — write "queued, not landed" and give the blocker.
 - **An interface that silently falls back to some default target when a locating argument is missing must be
   wrapped fail-closed at our layer** (`verification-and-gates.md` general rule + `agenttui-registry.md`
   §1.1 instance + `tool-registry.md` §1.1 entry-form consistency) — **the third time this repository has hit
