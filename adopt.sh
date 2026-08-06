@@ -304,6 +304,41 @@ hvcs_snapshot_durable() {
   fi
 }
 
+# 侧史凭据门（pre-commit）：ignore 类机制全都在 `add -f` 面前失效 —— 探针读数
+# `add <被 exclude 的路径>` → staged 0，`add -f <同一路径>` → staged 1，而整面 force-add
+# （含 `./hgit snapshot`）是这套工具链的既定用法。故只有 pre-commit 检查【已 staged 的内容】
+# 这一层绕不过去。危害不是外泄（侧史无 remote），而是旁路 fail-closed 契约：凭据管理器
+# 失效时删文件 ⇒ 消费者依赖「文件在 = 值有效」，而历史里的旧值不会被删。
+# 判据与 allowlist 四段字段（approver/date/scope/why，缺一即 fail-closed）见
+# overlay/hook-templates/credential-gate/README.md。
+hvcs_install_credential_gate() {
+  local src="$SRC/hook-templates/credential-gate/pre-commit"
+  local dst="$ROOT/.harness-vcs/hooks/pre-commit"
+  local marker="ARBORIST-CREDENTIAL-GATE:v1"
+  if [ ! -f "$src" ]; then
+    echo "  ✗✗ 缺少凭据门模板（$src）—— 侧史无 pre-commit 保护"
+    return 1
+  fi
+  mkdir -p "$ROOT/.harness-vcs/hooks"
+  # 用户自有钩子绝不覆盖。判据是 marker 而非「文件存在」：Arborist 装的那份要能被刷新。
+  if [ -e "$dst" ] && ! grep -q "$marker" "$dst" 2>/dev/null; then
+    echo "  ✗✗ 已存在【用户自己的】.harness-vcs/hooks/pre-commit —— 未覆盖，凭据门【没有装上】"
+    echo "     手工合并（把门作为独立脚本放旁边，从你的钩子里调它）："
+    echo "       cp $src $ROOT/.harness-vcs/hooks/credential-gate"
+    echo "       chmod +x $ROOT/.harness-vcs/hooks/credential-gate"
+    echo "     再在你自己的 pre-commit 末尾追加（非零退出必须原样传出，否则门 fail-open）："
+    echo '       "$(dirname "$0")/credential-gate" || exit $?'
+    return 1
+  fi
+  if [ -e "$dst" ] && cmp -s "$src" "$dst"; then
+    echo "  · 侧史凭据门已在位（内容一致，未改动）"
+    return 0
+  fi
+  cp "$src" "$dst"
+  chmod +x "$dst"
+  echo "  ✓ 侧史凭据门已装到 .harness-vcs/hooks/pre-commit（判据/豁免见 credential-gate/README.md）"
+}
+
 HVCS_OK=1
 HVCS_FRESH=0
 if [ ! -d "$ROOT/.harness-vcs" ]; then
@@ -319,9 +354,16 @@ if [ "$HVCS_OK" = 1 ]; then
   # 修复守卫【每次 adopt 都跑】，不只首次创建 —— 否则现存 adopter 永远拿不到本修复。
   hvcs_write_exclude
   hvcs_check_visibility
+  # 门必须先于第一次提交装上：事故正是发生在一次 blanket snapshot 上，而 baseline 就是一次。
+  hvcs_install_credential_gate || true
   if [ "$HVCS_FRESH" = 1 ]; then
     if hvcs_snapshot_durable; then
-      git --git-dir="$ROOT/.harness-vcs" --work-tree="$ROOT" -c user.name=harness-local -c user.email=harness@localhost commit -q -m "baseline: Arborist overlay adopted" || true
+      # 不吞失败：`|| true` 会把「凭据门拦下了 baseline」变成静默无提交，
+      # 而那正是最需要被看见的一次拒绝。
+      if ! git --git-dir="$ROOT/.harness-vcs" --work-tree="$ROOT" -c user.name=harness-local -c user.email=harness@localhost commit -q -m "baseline: Arborist overlay adopted"; then
+        echo "  ✗✗ baseline commit 未成功（见上方输出；若是凭据门拒绝，按它给的三条出路处置）"
+        echo "     处置后重跑：./hgit commit -m \"baseline: Arborist overlay adopted\""
+      fi
     fi
   else
     # 现存 adopter：只修 exclude，【不 stage 任何东西】。gardener 可能已备好选择性暂存
@@ -381,11 +423,16 @@ cat <<'NEXT'
      UserPromptSubmit hook 数组里、既有那条之后追加一条命令（既有钩子脚本零改动）；
      逐字模板与另一种形态见 overlay/hook-templates/submit-ack/README.md。
      装完跑 `python3 .trellis/scripts/agenttui_submit_ack.py print-path` + README 的三步探针。
-  3) brand compatibility 已机械写入 AGENTS.md 与 workflow Phase Index；可跑
+  3) 侧史凭据门：已装到 .harness-vcs/hooks/pre-commit（上面若打了 ✗✗ 则【没装上】，按那段指引手工合并）。
+     判据/豁免格式见 overlay/hook-templates/credential-gate/README.md：豁免是一行 echo 进
+     .harness-vcs/allowed-credentials，四段 approver/date/scope/why 缺一即 fail-closed 拒绝提交。
+     **验证要端到端**：按该 README 末尾的探针在 mktemp -d 的抛弃目录里真跑一次 commit
+     （看两条读数：rc≠0 且 rev-list --count --all 为 0）。别在真实仓里做这个探针。
+  4) brand compatibility 已机械写入 AGENTS.md 与 workflow Phase Index；可跑
      `python3 scripts/install-brand-compat.py --source-tree /path/to/Arborist --check` 验证。
-  4) 用 Multica 则设 env：MULTICA_WORKSPACE_ID / TRELLIS_MULTICA_PROJECT_ID，并在 .trellis/config.yaml 挂 hooks + session_auto_commit: false。
-  5) 用 codegraph 则 `codegraph init && codegraph install`。
-  6) 重启 AI session。harness 改动走 ./hgit（log/diff/checkout 回退）；落定用
+  5) 用 Multica 则设 env：MULTICA_WORKSPACE_ID / TRELLIS_MULTICA_PROJECT_ID，并在 .trellis/config.yaml 挂 hooks + session_auto_commit: false。
+  6) 用 codegraph 则 `codegraph init && codegraph install`。
+  7) 重启 AI session。harness 改动走 ./hgit（log/diff/checkout 回退）；落定用
      `./hgit snapshot --dry-run` 复核后 `./hgit snapshot && ./hgit commit -m "..."`
      —— snapshot 按显式 durable 白名单暂存并剔掉凭证/缓存/备份，不依赖 untracked 可见性。
 NEXT

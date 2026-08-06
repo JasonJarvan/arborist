@@ -14,7 +14,7 @@
 cd /path/to/your-repo
 bash /path/to/Arborist/adopt.sh
 ```
-脚本做：required 依赖检查（Trellis/Superpowers，缺失只告警）→ 铺 guides / scripts / hgit / `.work_context` 模板 / `.arborist/` 注册表骨架 → 把 `ARBORIST-BRAND-COMPAT:v1` 幂等写入 `AGENTS.md`（Trellis 块外）和 workflow Phase Index（Phase 1 前）并安装 Claude 固定模型 agents → 写 `.git/info/exclude` → 建/校正 `.harness-vcs` 本地仓（**首次建时用 `hgit snapshot` 打 durable 基线**；**每次 adopt 都按 allowlist 校正侧史 exclude** + 探测可见性；已存在的侧史仓**只校正 exclude、不暂存任何文件**，落定归 gardener）→ optional 工具置备（逐个问，绝不代装）。
+脚本做：required 依赖检查（Trellis/Superpowers，缺失只告警）→ 铺 guides / scripts / hgit / `.work_context` 模板 / `.arborist/` 注册表骨架 → 把 `ARBORIST-BRAND-COMPAT:v1` 幂等写入 `AGENTS.md`（Trellis 块外）和 workflow Phase Index（Phase 1 前）并安装 Claude 固定模型 agents → 写 `.git/info/exclude` → 建/校正 `.harness-vcs` 本地仓（**首次建时用 `hgit snapshot` 打 durable 基线**；**每次 adopt 都按 allowlist 校正侧史 exclude** + 探测可见性；已存在的侧史仓**只校正 exclude、不暂存任何文件**，落定归 gardener；**装 pre-commit 凭据门**，先于第一次提交，用户自有钩子不覆盖）→ optional 工具置备（逐个问，绝不代装）。
 
 ### 侧史可见性：allowlist 的效力边界（重要）
 侧史 exclude 写的是 allowlist（不是裸 `/*`），用意是让 durable 面（`.trellis/spec/**`、`.trellis/scripts/`、`.arborist/tools/`、`.work_context/sendbox/`）里**新建的未跟踪文件对 `hgit status` 现形**，运行时态 / 缓存 / 备份 / 凭证 `*.env` 继续隐身；块外 adopter 自加条目原样保留。
@@ -39,11 +39,16 @@ bash /path/to/Arborist/adopt.sh
    - 形态 B（host 只支持单条 hook 命令时）：把 `claude-code.snippet.py` / `codex.snippet.py` 贴进既有钩子脚本，载入 payload 之后、任何 `print` 之前。**注意 `trellis update` 覆盖该脚本时需重贴。**
    - ⚠️ **与上面那个坑是同一个坑**：`.claude/settings.json` 被产品仓 git 跟踪时，`trellis init -y` 静默跳过 hook 安装 ⇒ **ack 也不会有**。这正是规范里「**ack 缺失只能读作「未确认」，绝不读作「未提交」**」的由来——反着读会触发降级并**重复投递**。
    - 装完机械验证（别只看配置长得对）：`python3 .trellis/scripts/agenttui_submit_ack.py print-path`，再按模板 README 的三步探针跑一遍；`record` 的 stdout 必须为空、退出码必须为 0。
-3. **Brand compatibility 自检**：安装过程不会覆盖 managed block 外的 `AGENTS.md` / workflow 文本，也不会覆盖用户自有的同名 Claude agent。已有 `_handoff-config.yaml` 若仍是旧 schema，adopt 会保留原文件并 fail closed，提示按新模板人工合并。验证已安装结果：`python3 scripts/install-brand-compat.py --source-tree /path/to/Arborist --check`。
-4. **Multica**（可选）：设 `MULTICA_WORKSPACE_ID` / `TRELLIS_MULTICA_PROJECT_ID`；`.trellis/config.yaml` 挂 `hooks.after_start/after_archive: python3 scripts/trellis_multica_sync.py on-start|on-archive` + `session_auto_commit: false`。不用 Multica 则跳过。
-5. **codegraph**（可选）：`codegraph init && codegraph install`（写 `.mcp.json`）。
-6. **optional 工具置备的行为**（agentsview / multica / codegraph；guide：[`tool-registry.md`](./overlay/spec/guides/tool-registry.md) §2.5）：adopt.sh 末尾逐个探测——已装则问「登记进 `~/.arborist/tools/`？」（同意 → 从模板拷 `tool.json`，幂等不覆盖，再把 `<占位>` 换实况）；未装则问「需要吗？」（同意 → 只打印装法，**不代装**）；拒绝 → 打印该工具 fallback（如 Multica 拒装 = 台账退化为本地 `.trellis/tasks/` + sendbox 交办），流程照常。非交互（CI/pipe）只打汇总，不 prompt、不失败。
-7. 重启 AI session。
+3. **侧史凭据门自检**（模板见 [`overlay/hook-templates/credential-gate/`](./overlay/hook-templates/credential-gate/)；判据依据 [`verification-and-gates.md`](./overlay/spec/guides/verification-and-gates.md) 的「allowlist over denylist」）：
+   - adopt 已把 pre-commit 凭据门装到 `.harness-vcs/hooks/pre-commit`（**幂等**：带 `ARBORIST-CREDENTIAL-GATE:v1` marker 的那份才会被刷新）。**已存在你自己的 `pre-commit` 时 adopt 不覆盖**，只打 `✗✗` 并给手工合并指引 —— 那种情况下**门没有装上**，必须按指引手工接线（从你的钩子里调它，且**非零退出要原样传出**，否则门 fail-open）。
+   - 为什么需要它：**ignore 类机制全都在 `add -f` 面前失效**（探针：`add <被 exclude 的路径>` → staged 0；`add -f <同一路径>` → staged **1**），而整面 force-add 含 `./hgit snapshot` 是既定用法 ⇒ 只有 pre-commit 检查**已 staged 的内容**这一层绕不过去。危害不是外泄（侧史无 remote），而是**旁路 fail-closed 契约**：凭据管理器失效时删文件 ⇒ 消费者依赖「文件在 = 值有效」，而**历史里的旧值不会被删**，读历史者会拿到「看起来有效、实际已废」的凭据。
+   - **豁免要便宜**（否则门会被绕）：`echo '<路径>  # approver=<谁> date=<YYYY-MM-DD> scope=<授权范围> why=<理由>' >> .harness-vcs/allowed-credentials`。**四段缺一不可且不接受占位值** —— 缺字段的条目**不生效**且该次提交**被拒**（不静默忽略，否则写它的人会以为豁免生效了）。`scope` 必写的理由是**授权不外推**：一条单点授权不写范围就会被后来者读成通则。
+   - **验证必须端到端**（`verification-and-gates.md`「门的回归必须端到端」的实例 (i) 就是这个门的上一次回归 —— 它只 `import` 了分类函数，从未穿过「hook 被调用 → 拒绝提交」，是一次真的绕过**提交成功了**才暴露）：按模板 README 末尾那段探针，在一个 `mktemp -d` 的**抛弃目录**里真跑一次 `commit`，同时看两条读数 —— `rc≠0` **且** `rev-list --count --all` 为 0。**别在真实仓里做这个探针。**
+4. **Brand compatibility 自检**：安装过程不会覆盖 managed block 外的 `AGENTS.md` / workflow 文本，也不会覆盖用户自有的同名 Claude agent。已有 `_handoff-config.yaml` 若仍是旧 schema，adopt 会保留原文件并 fail closed，提示按新模板人工合并。验证已安装结果：`python3 scripts/install-brand-compat.py --source-tree /path/to/Arborist --check`。
+5. **Multica**（可选）：设 `MULTICA_WORKSPACE_ID` / `TRELLIS_MULTICA_PROJECT_ID`；`.trellis/config.yaml` 挂 `hooks.after_start/after_archive: python3 scripts/trellis_multica_sync.py on-start|on-archive` + `session_auto_commit: false`。不用 Multica 则跳过。
+6. **codegraph**（可选）：`codegraph init && codegraph install`（写 `.mcp.json`）。
+7. **optional 工具置备的行为**（agentsview / multica / codegraph；guide：[`tool-registry.md`](./overlay/spec/guides/tool-registry.md) §2.5）：adopt.sh 末尾逐个探测——已装则问「登记进 `~/.arborist/tools/`？」（同意 → 从模板拷 `tool.json`，幂等不覆盖，再把 `<占位>` 换实况）；未装则问「需要吗？」（同意 → 只打印装法，**不代装**）；拒绝 → 打印该工具 fallback（如 Multica 拒装 = 台账退化为本地 `.trellis/tasks/` + sendbox 交办），流程照常。非交互（CI/pipe）只打汇总，不 prompt、不失败。
+8. 重启 AI session。
 
 ## 适配面（替换 一个内部仓 worked-example）
 | 占位 | 换成 |

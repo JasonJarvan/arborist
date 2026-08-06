@@ -67,10 +67,57 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   mechanism as "a gate with many false positives gets learned-around", one entrance making the gate *noisy*
   and the other making it *expensive*. Hence: a denylist→allowlist conversion is only done when that half is
   done too; inverting the list while keeping a manual approval round merely trades silent leakage for
-  systematic bypass, whose readings look *better*. One item is deliberately **registered but not landed**:
-  allowlist entries must carry a `scope` (a single-point authorisation otherwise reads as a general one) —
-  it must land **together with** the credential-gate implementation, because landing either half alone loses
-  the other.
+  systematic bypass, whose readings look *better*. The `scope` half is now landed with its executor — see the
+  credential gate entry below.
+- **Harness side-history credential gate (`overlay/hook-templates/credential-gate/`), wired by `adopt.sh` into
+  `.harness-vcs/hooks/pre-commit`, with `scope` enforced as a real check** — this is the executor the
+  `scope` rule above was registered against; both halves land together, because a rule without an executor is
+  decoration while an implementation without `scope` turns unscoped authorisations into accomplished facts
+  that later cannot be reconstructed.
+  **Why nothing of the ignore family can do this job**: two defences were measured failing. A *file-name shape
+  list* missed the shapes actually hit (`.local.md`, an `.env` in a subdirectory) — its completeness depends on
+  what the author happened to think of, and the missing cell passes silently. A *directory-level exclusion* is
+  overruled by `add -f`, measured: `add <excluded path>` → 0 staged, `add -f <same path>` → **1** staged — and
+  force-adding whole harness subtrees (including `hgit snapshot`) is this toolchain's *established* usage, not
+  anyone's slip. Hence only a **pre-commit check of already-staged content** cannot be routed around.
+  **The real hazard is not leakage but bypassing a fail-closed contract**: the side history has no remote, so
+  nothing escapes. What breaks is this — a credential manager's correct design is *delete the file when it
+  expires*, so consumers may rely on "file present ⇒ value valid"; but **old values in version history are not
+  deleted with it**, and a reader of history gets a credential that *looks valid and is already void*, with the
+  contract telling it not to doubt. That converts a fail-closed design into a fail-open one.
+  **Judged by class, not by shape**: sha256 digests, keys that are publishable by design (publishable / anon /
+  public-client — the *value* is checked too, since those often sit in a field named `api_key`), account
+  identifiers and placeholders are **not** secrets; a suspicious *path* with no real secret in it is let
+  through, and no path-shape list takes part in the verdict at all — that is precisely the defence measured
+  failing above. Over-reporting inflates the remediation surface and **dilutes the one item that actually
+  needed it**. **Fail-closed throughout**: an unavailable gate refuses. The class exists because of a measured
+  fail-open — the gate once derived the repo root from its own file's relative depth, the file moved, the
+  derivation pointed elsewhere, the git subcommand failed, stdout was empty, the staged list came out empty and
+  the gate **silently returned 0**. *A fail-open security gate is worse than no gate: it makes people believe
+  they are protected.* Git-dir now comes only from `GIT_DIR` (which git guarantees when invoking a hook), with
+  an upward search for `.harness-vcs` as fallback and a refusal if neither works.
+  **Exemption must stay cheap** or the gate gets routed around: one `echo` appends a line to
+  `$GIT_DIR/allowed-credentials`, i.e. right next to what it guards. **All four fields
+  (`approver`/`date`/`scope`/`why`) are required and placeholder values do not count**; a defective entry
+  **does not take effect** *and* the commit is refused with the line number and the missing field named — not
+  silently ignored, since silent ignoring lets the author believe the exemption is live and discover otherwise
+  only at the next real commit, or worse, conclude the gate is broken and bypass it. `scope` is required
+  because **authorisation does not extrapolate**: a "this one file" authorisation, unscoped, gets read by the
+  next person as "files of this kind are fine", and by then the original intent is unrecoverable.
+  **Self-match protection is a property of the source, not a path exception**: a detector inherently contains
+  the patterns it detects, and this gate was once refused by itself. Bare literals are written so they
+  *cannot* match themselves (`sb[_]secret[_]` rather than the plain form); granting itself a path exception
+  would be special-casing that also breaks on rename or copy. `tests/test_credential_gate.py` feeds the gate's
+  own source to its own classifier and asserts zero hits.
+  **Its regression is end-to-end**, per the rule above whose instance (i) *is this gate's previous
+  regression*: the tests build a throwaway repo under `tempfile.mkdtemp`, install the hook, `add -f` a
+  fragment-assembled fake secret and **really run `git commit`**, asserting **both** readings — non-zero exit
+  **and** no commit produced — plus an attribution control (the same commit succeeds when the gate is not
+  installed) and the passing side likewise really committing. Also gated in `adopt.sh`: the hook is installed
+  **before the first commit** (the incident was a blanket snapshot, and the baseline is one), installation is
+  idempotent via an `ARBORIST-CREDENTIAL-GATE:v1` marker, a **user's own** `pre-commit` is never overwritten
+  (loud warning plus manual-merge instructions), and the baseline commit no longer swallows failure with
+  `|| true` — a refusal by this gate is the one refusal that most needs to be seen.
 - **Exemplary vs exhaustive lists** (`generalization-boundary.md`) — sync and privacy both run on lists (the
   sync allowlist, structural exclusions, placeholder tables, the detection layer's pattern set), and
   **whether a list is exemplary or exhaustive must be written on the list**, because the two demand

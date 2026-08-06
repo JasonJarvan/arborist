@@ -1,0 +1,354 @@
+#!/usr/bin/env python3
+# ARBORIST-CREDENTIAL-GATE:v1 —— adopt.sh 据这一行判「这份钩子是 Arborist 装的」：
+# 有它 ⇒ 可安全刷新；没有它 ⇒ 是用户自己的钩子，绝不覆盖（只告警 + 给合并指引）。
+"""harness 侧史（`hgit` / `.harness-vcs`）pre-commit 凭据门 —— `add -f` 唯一绕不过去的那一层。
+
+## 为什么必须是 pre-commit，而不是某种 ignore
+
+一次跨多个仓的 harness blanket snapshot 把凭据提交进了各仓侧史。事后两种防线都被实测证明挡不住：
+
+1. **文件名形态清单**（`*.local.json` / `.env` / `*.pem` …）—— 编写清单时就漏掉了实际命中的形态
+   （`.local.md`、子目录里的 `.env`）。清单的完整性取决于写清单的人当时想到了什么，
+   漏掉一格是**静默通过**。
+2. **目录级排除**（把凭据目录写进 exclude）—— 被 `add -f` 一票否决。探针读数：
+
+   | 命令 | staged 文件数 |
+   |---|---|
+   | `hgit add    <被 exclude 的路径>` | 0 |
+   | `hgit add -f <被 exclude 的路径>` | **1** |
+
+   而 `hgit` 自己的用法就包含 `add -f` 整个 harness 目录树 —— 整面 force-add 是这套工具链的
+   **既定用法**，不是谁的失误。
+
+⇒ **ignore 类机制全都在 `-f` 面前失效**；只有 pre-commit 检查**已 staged 的内容**。
+
+## 真实危害不是「泄漏」，而是旁路 fail-closed 契约
+
+侧史无 remote，且用户主目录通常对其他用户不可读 —— 所以危害不在外泄。真正的危害是：
+凭据管理器的正确设计是「**失效就删文件**」，于是消费者可以依赖「**文件在 = 值有效**」这条契约。
+但**版本历史里的旧值不会随之删除** —— 读历史的人会拿到一个「看起来有效、实际已废」的凭据，
+而那条契约告诉它不必怀疑。这是把一个 fail-closed 的设计**变成** fail-open 的。
+
+## 两条设计原则（两条都来自那次事故）
+
+- **按【分类】判，不按【形态】判。** sha256 摘要、按设计可公开的 key（publishable / anon 类）、
+  账号标识符、占位符**都不是秘密**。路径可疑而内容无真秘密 ⇒ **放行**。
+  混报会让处置范围虚高，并**稀释**真正该处置的那一个。
+  故本门**不含**任何「可疑路径名清单」参与判决 —— 那正是上面第 1 条失效的防线。
+- **豁免必须便宜**，否则门会被绕（人会去用 `--no-verify` 或干脆删掉钩子）。
+  故提供 `$GIT_DIR/allowed-credentials` allowlist：一行一条，加一条是一条 `echo`，
+  让「批准」和「绕过」一样便宜（`verification-and-gates.md`「allowlist over denylist」的配套那半）。
+
+## allowlist 的四段字段是**真校验**，不只是提示
+
+`approver` / `date` / `scope` / `why` 缺任一段 ⇒ **该条目不生效**，且**按 fail-closed 拒绝提交**，
+并指出第几行缺哪个字段。不静默忽略该条目 —— 静默忽略会让写它的人以为豁免已生效。
+
+`scope` 必写的理由是**授权不外推**：一条「这一个文件」的单点授权，不写范围就会被后来者
+读成「这类文件都可以」，而当时的意图已不可考。
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+# ── 按设计可公开：命中这些【不算】秘密，避免误伤。 ─────────────────────
+PUBLIC_BY_DESIGN = re.compile(
+    r"""(
+        sb[_]publishable[_]      # 客户端 publishable key，本就要发到浏览器
+      | \bpublic[_]client[_]key\b
+      | \banon[_]key\b
+      | ANON[_]KEY
+    )""",
+    re.VERBOSE,
+)
+
+# ── 摘要而非秘密：sha256 等不可逆摘要不算凭据。 ────────────────────────
+DIGEST = re.compile(r"(sha256:|\bsha256\b|^[0-9a-f]{64}$)", re.IGNORECASE)
+
+# ── 真秘密的内容形态 ───────────────────────────────────────────────────
+JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")
+PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+# ⚠️ 本节所有裸字面量都【故意】写成**不能匹配自身**的形式（用 `[_]` 代替 `_` 等）。
+# 原因：检测器天然含有它要检测的模式（grep 自己那个经典问题），本门第一次提交自己时
+# 被自己拦了下来。给自己开一条路径例外是**特例化**，且会随文件改名或被复制而失效；
+# 让字面量不自匹配才是治本。改这一节时请保持这个性质（`tests/test_credential_gate.py`
+# 会把本文件源码喂给分类器并断言零命中 —— 破坏该性质会当场失败）。
+# 带长度量词的（`sk-` 需 16+、`ghp` 需 20+ 后续字符）本就不会匹配源码，无需处理。
+SECRET_PREFIX = re.compile(
+    r"\b(sb[_]secret[_]|sk-[A-Za-z0-9]{16,}|ghp[_][A-Za-z0-9]{20,}|xox[baprs]-)"
+)
+# JSON / env 里的凭据字段名带非空值（占位符在下面被排除）
+CRED_FIELD = re.compile(
+    r'"(refresh_token|access_token|client_secret|private_key|api_key|apikey|password|secret)"'
+    r'\s*:\s*"([^"]{8,})"',
+    re.IGNORECASE,
+)
+PLACEHOLDER = re.compile(
+    r"^(<[^>]+>|\{\{.*\}\}|\$\{.*\}|xxx+|todo|changeme|your[-_].*|example.*|placeholder|redacted|\*+)$",
+    re.IGNORECASE,
+)
+
+ALLOWLIST_NAME = "allowed-credentials"
+REQUIRED_FIELDS = ("approver", "date", "scope", "why")
+FIELD_HEAD = re.compile(r"(?<![\w-])(approver|date|scope|why)=")
+DATE_SHAPE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+class GateUnavailable(RuntimeError):
+    """无法可靠地检查 —— 必须拒绝提交，绝不放行。
+
+    这个类存在是因为一次实测的 fail-open：本门早先用 `Path(__file__).parents[2]` 推仓根，
+    源文件被移到另一层深度后，推出来的不是仓根 ⇒ `--git-dir` 指向不存在的路径
+    ⇒ 子命令失败、stdout 为空 ⇒ **staged 列表为空 ⇒ 静默 `return 0` 放行**。
+
+    **一个 fail-open 的安全门比没有门更糟：它让人以为有保护。**
+    所以每一步都显式校验而不是猜，任何拿不准的情形一律走这里 → 拒绝。
+    """
+
+
+class AllowlistInvalid(GateUnavailable):
+    """allowlist 有条目缺字段 —— 同样 fail-closed（继承关系保证：删掉专用分支仍会拒绝）。"""
+
+    def __init__(self, allowlist: Path, defects: list[str]) -> None:
+        super().__init__(f"{allowlist}: " + "; ".join(defects))
+        self.allowlist = allowlist
+        self.defects = defects
+
+
+def resolve_git_dir() -> Path:
+    """定位 harness git-dir。**不靠本文件的位置推断** —— 那正是上面那次 fail-open 的成因。"""
+    # git 调用 hook 时保证设置 GIT_DIR（可能是相对路径，cwd 为 work-tree 顶层）。这是权威来源。
+    value = os.environ.get("GIT_DIR")
+    if value:
+        candidate = Path(value).resolve()
+        if (candidate / "HEAD").exists():
+            return candidate
+        raise GateUnavailable(f"GIT_DIR={value} 指向的不是 git-dir（缺 HEAD）")
+    # 手动运行时的兜底：从 cwd 向上找 .harness-vcs（与 hgit wrapper 同规则）。
+    current = Path.cwd().resolve()
+    while True:
+        candidate = current / ".harness-vcs"
+        if (candidate / "HEAD").exists():
+            return candidate
+        if current.parent == current:
+            raise GateUnavailable("无法定位 .harness-vcs（GIT_DIR 未设，且从 cwd 向上未找到）")
+        current = current.parent
+
+
+def git(git_dir: Path, *args: str) -> str:
+    """跑 git 子命令。非零退出即 fail-closed —— 不把失败当成「没有内容」。"""
+    result = subprocess.run(
+        ["git", f"--git-dir={git_dir}", f"--work-tree={git_dir.parent}", *args],
+        capture_output=True,
+        text=True,
+        errors="replace",  # 二进制 blob 不得让门崩成「拒绝一切」，那会把门变贵 ⇒ 被绕
+    )
+    if result.returncode != 0:
+        raise GateUnavailable(
+            f"git {' '.join(args[:2])} 失败 (rc={result.returncode}): {result.stderr.strip()[:200]}"
+        )
+    return result.stdout
+
+
+def parse_allowlist(text: str) -> tuple[set[str], list[str]]:
+    """解析 allowlist，返回（生效路径集合, 缺陷描述列表）。
+
+    缺陷 = 条目缺四段字段之一（或值仍是占位符 / `date` 形状不对）。缺陷条目**不进**生效集合，
+    调用方据缺陷列表 fail-closed。占位符也算缺失：错误提示里印的就是 `scope=<授权范围>`，
+    整行抄下来会得到一个字面占位值 —— 那不是一次授权。
+    """
+    allowed: set[str] = set()
+    defects: list[str] = []
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        path, _, comment = line.partition("#")
+        path = path.strip()
+        if not path:
+            continue
+
+        fields = _split_fields(comment)
+        missing = [key for key in REQUIRED_FIELDS if not _is_filled(fields.get(key))]
+        if missing:
+            defects.append(f"第 {lineno} 行 {path!r}：缺 " + "、".join(f"{k}=" for k in missing))
+            continue
+        if not DATE_SHAPE.match(fields["date"]):
+            defects.append(f"第 {lineno} 行 {path!r}：date={fields['date']!r} 不是 YYYY-MM-DD")
+            continue
+        allowed.add(path)
+    return allowed, defects
+
+
+def _split_fields(comment: str) -> dict[str, str]:
+    """按已知 key 切分 `k=v k=v` —— 值里允许空格（`why` 通常是一句话）。"""
+    heads = list(FIELD_HEAD.finditer(comment))
+    fields: dict[str, str] = {}
+    for index, head in enumerate(heads):
+        end = heads[index + 1].start() if index + 1 < len(heads) else len(comment)
+        fields[head.group(1)] = comment[head.end() : end].strip()
+    return fields
+
+
+def _is_filled(value: str | None) -> bool:
+    return bool(value) and not PLACEHOLDER.match(value)  # type: ignore[arg-type]
+
+
+def jwt_liveness(token: str) -> str:
+    """JWT 的活性描述。已过期的 JWT 仍不该进历史，但定级不同 —— 读数写给处置的人。"""
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(payload)).get("exp")
+        if not exp:
+            return "无 exp"
+        left = exp - time.time()
+        return f"未过期，剩 {left / 60:.0f} 分钟" if left > 0 else f"已过期 {-left / 86400:.1f} 天"
+    except Exception:
+        return "无法解析 exp"
+
+
+def classify(blob: str) -> list[str]:
+    """返回该内容里【真秘密】的证据行。空列表 = 放行。
+
+    判的是**分类**：摘要 / 按设计可公开的 key / 占位符不算秘密。**路径形态不参与判决**。
+    """
+    findings: list[str] = []
+
+    for match in JWT.finditer(blob):
+        findings.append(f"完整 JWT（{jwt_liveness(match.group(0))}）")
+        break
+
+    if PRIVATE_KEY.search(blob):
+        findings.append("PEM 私钥块")
+
+    for match in SECRET_PREFIX.finditer(blob):
+        prefix = match.group(1)
+        if not PUBLIC_BY_DESIGN.search(prefix):
+            findings.append(f"秘密前缀 {prefix!r}")
+            break
+
+    for match in CRED_FIELD.finditer(blob):
+        field, value = match.group(1), match.group(2)
+        # 值也要过 PUBLIC_BY_DESIGN：一个 publishable / anon key 常常就装在名叫
+        # `api_key` 的字段里 —— 只看字段名会把它误报成秘密。
+        if (
+            PLACEHOLDER.match(value)
+            or DIGEST.search(value)
+            or PUBLIC_BY_DESIGN.search(field)
+            or PUBLIC_BY_DESIGN.search(value)
+        ):
+            continue
+        findings.append(f'凭据字段 "{field}" 带非占位值（长度 {len(value)}）')
+        break
+
+    return findings
+
+
+def report_allowlist_defects(defects: list[str], allowlist: Path) -> None:
+    print("\n\x1b[31m✗ harness pre-commit 凭据门：allowlist 条目不完整，按 fail-closed 拒绝\x1b[0m", file=sys.stderr)
+    print(f"  文件：{allowlist}", file=sys.stderr)
+    for defect in defects:
+        print(f"    → {defect}", file=sys.stderr)
+    print("\n  四段字段缺一不可，格式：", file=sys.stderr)
+    print("    <路径>  # approver=<谁> date=<YYYY-MM-DD> scope=<授权范围> why=<理由/出处>", file=sys.stderr)
+    print("\n  为什么不是静默忽略这一条：静默忽略会让写它的人以为豁免已生效，", file=sys.stderr)
+    print("  下一次真提交时才发现门还在拦 —— 或者更糟，以为门坏了而去绕过它。", file=sys.stderr)
+    print("\n  为什么 scope 必写：\x1b[1m授权不外推\x1b[0m。一条「这一个文件」的单点授权，", file=sys.stderr)
+    print("  不写范围就会被后来者读成「这类文件都可以」，而当时的意图已不可考。", file=sys.stderr)
+    print("  范围要写成能被机械核对的形状（哪个路径、哪几个 git 面、到什么时候为止），", file=sys.stderr)
+    print("  不要写「已批准」这种无边界的词。", file=sys.stderr)
+
+
+def report_blocked(blocked: list[tuple[str, list[str]]]) -> None:
+    print("\n\x1b[31m✗ harness pre-commit 凭据门：拒绝提交\x1b[0m", file=sys.stderr)
+    print("  以下 staged 文件含【真秘密】形态的内容（已排除 sha256 摘要、", file=sys.stderr)
+    print("  按设计可公开的 key、账号标识符与占位符）：\n", file=sys.stderr)
+    for path, findings in blocked:
+        print(f"    {path}", file=sys.stderr)
+        for finding in findings:
+            print(f"        → {finding}", file=sys.stderr)
+    print("\n  为什么拦：凭据进版本历史会【旁路 fail-closed 契约】——", file=sys.stderr)
+    print("  凭据管理器失效时会删文件，所以消费者依赖「文件在 = 值有效」；", file=sys.stderr)
+    print("  但历史里的旧值不会被删，读历史者会拿到「看起来有效、实际已废」的凭据。\n", file=sys.stderr)
+    print("  三条出路（按推荐顺序）：", file=sys.stderr)
+    print("    1. 从索引移除，文件留在工作树：", file=sys.stderr)
+    print(f"         ./hgit rm --cached {blocked[0][0]}", file=sys.stderr)
+    print("    2. 若该文件【确实经过批准】要进历史，登记 allowlist（四段缺一不可）：", file=sys.stderr)
+    print(
+        f"         echo '{blocked[0][0]}  "
+        "# approver=<谁> date=<YYYY-MM-DD> scope=<授权范围> why=<理由/出处>' \\",
+        file=sys.stderr,
+    )
+    print(f"           >> .harness-vcs/{ALLOWLIST_NAME}", file=sys.stderr)
+    print("       ⚠️ scope 必写且必须真填（占位符不算）：\x1b[1m授权不外推\x1b[0m ——", file=sys.stderr)
+    print("          一条单点授权不写范围，就会被后来者读成一条通则。", file=sys.stderr)
+    print("    3. 一次性豁免（不留痕，不推荐）：./hgit commit --no-verify", file=sys.stderr)
+
+
+def main() -> int:
+    git_dir = resolve_git_dir()
+    allowlist_path = git_dir / ALLOWLIST_NAME
+
+    # allowlist 先于 staged 检查：条目残缺时**任何**提交都不该通过，
+    # 否则「缺 scope 的条目不生效」会以「这次刚好没命中」的形式被掩盖过去。
+    allowed: set[str] = set()
+    if allowlist_path.exists():
+        allowed, defects = parse_allowlist(allowlist_path.read_text(errors="replace"))
+        if defects:
+            raise AllowlistInvalid(allowlist_path, defects)
+
+    staged = [
+        path
+        for path in git(git_dir, "diff", "--cached", "--name-only", "--diff-filter=ACM").splitlines()
+        if path
+    ]
+    if not staged:
+        return 0
+
+    blocked: list[tuple[str, list[str]]] = []
+    for path in staged:
+        if path in allowed:
+            continue
+        blob = git(git_dir, "show", f":{path}")
+        if not blob:
+            continue
+        findings = classify(blob)
+        if findings:
+            blocked.append((path, findings))
+        # 无 findings → 放行，**即使路径看着像凭据落点**。按分类判，不按形态判。
+
+    if not blocked:
+        return 0
+    report_blocked(blocked)
+    return 1
+
+
+if __name__ == "__main__":
+    # fail-closed 收口：任何内部异常都拒绝提交，绝不静默放行。
+    try:
+        sys.exit(main())
+    except AllowlistInvalid as error:
+        report_allowlist_defects(error.defects, error.allowlist)
+        sys.exit(1)
+    except GateUnavailable as error:
+        print("\n\x1b[31m✗ harness pre-commit 凭据门：无法检查，按 fail-closed 拒绝\x1b[0m", file=sys.stderr)
+        print(f"  原因: {error}", file=sys.stderr)
+        print("  修好门再提交；确定要绕过用 ./hgit commit --no-verify（留痕由你负责）。", file=sys.stderr)
+        sys.exit(1)
+    except Exception as error:  # noqa: BLE001 —— 门的任何未预期失败都必须拒绝
+        import traceback
+
+        print("\n\x1b[31m✗ harness pre-commit 凭据门：内部错误，按 fail-closed 拒绝\x1b[0m", file=sys.stderr)
+        print(f"  {type(error).__name__}: {error}", file=sys.stderr)
+        traceback.print_exc(limit=3, file=sys.stderr)
+        sys.exit(1)
