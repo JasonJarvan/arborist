@@ -36,6 +36,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning aims 
   deliberately, since syncing would hide the rot.
 
 ### Added
+- **A forensic command is itself fallible, and its failure arrives dressed as a normal reading**
+  (`verification-and-gates.md`) plus the mechanical remedy for the delivery case (`--message-file` on
+  `agenttui.py send`) — five measured instances in one night across two independent parties: positional
+  parameters that never split so `git diff "a b" ""` ran and nearly read as "that commit does not
+  exist"; a diagnostic wrapped in `>/dev/null 2>&1` whose subcommand **did not exist at all**, so its
+  failure was never once visible across twelve runs; `$?` taken after a pipe, reporting the tail's zero
+  instead of the command's refusal; an incomplete directory listing that nearly produced a report of a
+  **nonexistent emergency**. The load-bearing observation is not the list but what it implies about
+  RULE FORM: three of those came from one party who **knew this rule and did not trigger it three
+  times**, so a rule that keeps not firing while its owner knows it has the wrong FORM, not the wrong
+  content — it must become a mechanism (an unskippable default, a check that fails, or an interface
+  that offers no faulty shape), and restating it is the most tempting and least effective response
+  because it produces the reading "handled" without changing the rate. Mechanical products: a
+  diagnostic may not discard stderr (silencing stdout is fine; collapsing a command's failure and its
+  negative conclusion into one reading is not); the exit code must come from the command being
+  diagnosed rather than the end of a pipe; and a negative conclusion on first run must first prove the
+  command itself, because a negative conclusion carries its own explanatory power while "my command was
+  wrong" does not. Also records the variant where **a broken step is masked by an effective one** — the
+  combined flow proves at least one step works while reading as though both do.
+- **Corrected the observable signature of sender-side envelope corruption** (`agenttui-registry.md`
+  shape 5) — it was implicitly "the text got shorter". A second instance from a different sender
+  disproves that: two backtick spans were substituted away and the delivered body **merely gained two
+  spaces**. Three consequences all point opposite to the old signature: a classifier must not compare
+  length; **the receiver structurally cannot detect it** (measured — the receiver noticed nothing and
+  learned of it only from the sender's correction, because nothing in the delivered bytes says a span
+  used to be there), so the check must live sender-side; and what gets removed is precisely the class of
+  CONCRETE VALUES (readings, paths, commands, identifiers), since that is what people wrap in backticks
+  — so the corrupted body keeps its whole argument and loses all of its checkability, reading like an
+  assertion made without evidence rather than like damage. Remedy is mechanical rather than advisory:
+  `send --message-file <path>` (`-` for stdin) keeps the body off the shell entirely, and an empty body
+  is refused outright, since an empty body is the likeliest observable trace of a whole span being
+  substituted away and a delivered empty envelope is indistinguishable at the receiver from a sender
+  with nothing to say.
 - **An agent's `capabilities` record the REASON, not a boolean** (`agenttui-registry.md` §2.1.1, closed
   set `available` / `policy-denied` / `unavailable`, enforced by a new registry-validator check) —
   **policy-denied is not capability-absent. The effect is identical (nothing can be dispatched) and the
