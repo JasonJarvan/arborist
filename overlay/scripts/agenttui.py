@@ -581,6 +581,31 @@ class PaneTransport:
         """Is this transport's own tooling usable at all in this process?"""
         raise NotImplementedError
 
+    def self_pane_ref(self) -> dict[str, str] | None:
+        """This process's **own** pane, as reported by the multiplexer. None = unknown.
+
+        Why this exists at all: §5.0's root rule refuses a write whose
+        self-identification evidence does not *uniquely determine* the pane, and
+        until now that rule could only ever refuse -- nothing produced evidence
+        strong enough to pass it. A multiplexer that injects the pane id into each
+        pane's process environment produces exactly that evidence, and it is
+        correct **by construction**: the value is not inferred, not matched against
+        a display title, and not read out of a listing that could name someone
+        else's pane.
+
+        The distinction that makes this safe: a *self*-query answers "which pane am
+        I", which no amount of ambiguity elsewhere can corrupt. Reading a pane
+        listing answers "which panes exist", and choosing one of them from a title
+        is the guessing the root rule forbids -- a title is a display name, and the
+        one time a stale ref pointed at a live pane belonging to somebody else, the
+        id looked entirely plausible.
+
+        Contract for implementations: **measurement only**. Any problem yields None,
+        which callers must read as "unknown", never as "not in a pane". Never
+        synthesise a pane id, and never fall back to a listing.
+        """
+        return None
+
     def exists(self, pane_ref: dict[str, str]) -> Capability:
         """Existence preflight for the addressed pane (rule 5).
 
@@ -1445,6 +1470,30 @@ class ZellijTransport(PaneTransport):
     def _own_session(self) -> str | None:
         return os.environ.get("ZELLIJ_SESSION_NAME") or None
 
+    def self_pane_ref(self) -> dict[str, str] | None:
+        """Own pane from `ZELLIJ_SESSION_NAME` + `ZELLIJ_PANE_ID`. Runs no command.
+
+        `ZELLIJ_PANE_ID` holds a bare integer while `zellij action --pane-id`
+        documents `terminal_1, plugin_2 or 3 (equivalent to terminal_3)` -- both
+        forms address the same pane, so a bare id is *accepted* by the write path.
+        It is nonetheless canonicalised to `terminal_<n>` here, because
+        `action list-panes` reports the prefixed form and the reachability check
+        compares the stored value against that listing **as a string**: storing the
+        bare form would leave delivery working while the *verification* refused,
+        i.e. a fail-closed refusal on a pane that was fine.
+
+        Only a bare integer is prefixed. A value that already carries a kind
+        (`terminal_`/`plugin_`) is passed through untouched -- rewriting it would be
+        this method inventing an id, which the base contract forbids.
+        """
+        session = self._own_session()
+        pane = (os.environ.get("ZELLIJ_PANE_ID") or "").strip()
+        if not session or not pane:
+            return None
+        if pane.isdigit():
+            pane = f"terminal_{pane}"
+        return {"multiplexer": self.name, "session": session, "pane_id": pane}
+
     def _classify_intrusion(self, outcome: CommandOutcome) -> str | None:
         if outcome.rejected:
             # Nothing was delivered and nothing moved; the intrusion question
@@ -1853,6 +1902,42 @@ class TmuxTransport(PaneTransport):
             return None
         return outcome.stdout.strip() or None
 
+    def self_pane_ref(self) -> dict[str, str] | None:
+        """Own pane from `TMUX_PANE`, plus the session name via a *self*-query.
+
+        `TMUX_PANE` is the pane's own id, injected by tmux -- the same reading the
+        existing same-session measurement already relies on. The session name needs
+        one command, and `display-message -p` **with no `-t`** is the one legitimate
+        use of it: with no target it is a self-query, so the "silently falls back to
+        the current pane" behaviour that disqualifies it as an existence probe is
+        precisely what is wanted here.
+
+        The socket dimension is carried when `$TMUX` reports one, because the
+        `(multiplexer, session, pane_id)` triple can name two different real panes
+        on two different servers.
+        """
+        pane = (os.environ.get("TMUX_PANE") or "").strip()
+        if not pane:
+            return None
+        try:
+            outcome = self._run(
+                [self.executable, "display-message", "-p", "#{session_name}"],
+                cwd=None,
+                timeout=None,
+            )
+        except Exception:  # measurement must never synthesise a reading
+            return None
+        if outcome.rejected or outcome.returncode != 0:
+            return None
+        session = outcome.stdout.strip()
+        if not session:
+            return None
+        ref = {"multiplexer": self.name, "session": session, "pane_id": pane}
+        socket = os.environ.get("TMUX", "").split(",")[0].strip()
+        if socket:
+            ref["socket"] = socket
+        return ref
+
     @staticmethod
     def _same_server(pane_ref: dict[str, str]) -> bool | None:
         """Is the addressed server this process's own server? None = unknown.
@@ -1918,6 +2003,37 @@ TRANSPORTS: dict[str, Callable[[], PaneTransport]] = {
     ZellijTransport.name: ZellijTransport,
     TmuxTransport.name: TmuxTransport,
 }
+
+
+def self_reported_pane_ref() -> tuple[dict[str, str] | None, str]:
+    """This process's own pane, asked of every transport. → (pane_ref | None, reason).
+
+    **Ambiguity refuses.** If more than one transport reports a pane, this process
+    sits inside nested multiplexers and there is no evidence for which one owns the
+    pane that a peer would have to address. Picking one would be a guess, and the
+    guess is silent: the wrong choice yields a pane_ref that resolves to a real,
+    live pane belonging to someone else. That is the exact harm §5.0's root rule
+    exists to prevent, so the ambiguous case reports None with a reason rather than
+    a plausible answer.
+    """
+    found: list[dict[str, str]] = []
+    for factory in TRANSPORTS.values():
+        try:
+            ref = factory().self_pane_ref()
+        except Exception:  # measurement must never break the caller
+            ref = None
+        if ref is not None:
+            found.append(ref)
+    if not found:
+        return None, "no multiplexer reported a pane for this process"
+    if len(found) > 1:
+        names = ", ".join(sorted(str(ref.get("multiplexer")) for ref in found))
+        return None, (
+            f"nested multiplexers reported a pane ({names}); which one a peer must "
+            f"address is undetermined, and guessing yields a ref that resolves to "
+            f"someone else's live pane"
+        )
+    return found[0], "self-reported by the multiplexer to this process"
 
 
 def resolve_transport(
@@ -2552,6 +2668,32 @@ def write_runtime_state(
     runtime = read_json(agent.runtime_path)
     runtime["state"] = state
     runtime["last_seen"] = now
+
+    # A heartbeat is written by the owner from inside its own pane, so it is the one
+    # moment where evidence that *uniquely determines* the pane is available -- and
+    # §5.0's root rule until now could only refuse, because nothing produced such
+    # evidence. Take it, and take it unconditionally.
+    #
+    # Absence CLEARS rather than preserves, and the direction is not symmetric: a
+    # stale ref is worse than a missing one. Missing degrades delivery to "no
+    # operational route" (visible, fail-closed); stale sends keystrokes into a pane
+    # that is alive and belongs to somebody else. Measured instance: after a machine
+    # migration, leaves carried a previous host's ids while a same-named session was
+    # live here, so every one of those refs resolved -- to the wrong panes.
+    #
+    # The contract this implies, stated so it is not discovered by surprise:
+    # **run the heartbeat from inside the agent's own pane.** Running it from
+    # elsewhere is not a mistake to be tolerated by keeping the old value -- from
+    # elsewhere the old value is, by definition, no longer self-evidenced.
+    if state == "active":
+        self_ref, reason = self_reported_pane_ref()
+        runtime["pane_ref"] = self_ref
+        if self_ref is None:
+            runtime["pane_ref_cleared_reason"] = reason
+        else:
+            runtime.pop("pane_ref_cleared_reason", None)
+        runtime["pane_ref_source"] = reason
+
     atomic_write_json(agent.runtime_path, runtime)
     if global_index is None:
         return {"leaf": "written", "summary": "not-requested"}
