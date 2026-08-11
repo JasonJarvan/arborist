@@ -10,6 +10,7 @@
   "install": "随 Arborist/Trellis harness 下发（adopt 铺到 .trellis/scripts/）；无需另装 Python 依赖（stdlib-only）。Codex/Claude Code 容量各需其本机 CLI 已安装并登录，但 observer 不读/存/传其 token。",
   "fallback": "脚本缺席或某 brand 无可信观测时不阻塞派活：容量退化为 unknown，改由人工按 role affinity 选 brand（impler 偏 codex，orchestrator 偏 claude-code），并停下人工确认，绝不把 unknown/stale 当 fresh headroom。",
   "availability": "python3 .trellis/scripts/arborist_brand_capacity.py --help；快照现况用 status 子命令只读探测",
+  "availability_expect": "正文是一份含 `schema_version` / `generated_at` / `brands` 的 JSON;**`generated_at` 陈旧时按 stale 处理,不得当 fresh headroom**。",
   "auth": "无网络、无鉴权；不读/存/打印任何凭据。Claude collector 借本机 claude CLI 已有登录态运行内置 /usage，但绝不读取/复制/传递 token。",
   "notes": "推荐仅建新 Impler 前合法（selection_scope=impler-creation-only）；launcher 只选二进制，被启动会话自登记真实 brand；既有 Impler 及其 L1 链绝不跨 brand 切（耗尽则 handoff 新 Impler）。写者子命令（refresh/report/serve）取单写者 flock，占用即退 1；serve 是可选前台循环、非 daemon。契约与 schema 见 spec/guides/agenttui-launch-and-brand-capacity.md 与 ADR-0008。",
   "known_limits": [
