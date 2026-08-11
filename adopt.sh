@@ -359,7 +359,7 @@ hvcs_install_credential_gate() {
   local dst="$ROOT/.harness-vcs/hooks/pre-commit"
   local marker="ARBORIST-CREDENTIAL-GATE:v1"
   if [ ! -f "$src" ]; then
-    echo "  ✗✗ 缺少凭据门模板（$src）—— 侧史无 pre-commit 保护"
+    echo "  ✗✗ 缺少凭据门模板（${src}）—— 侧史无 pre-commit 保护"
     return 1
   fi
   mkdir -p "$ROOT/.harness-vcs/hooks"
@@ -425,7 +425,7 @@ offer_tool() { # $1=命令名 $2=装法 $3=fallback
   local tpl="$SRC/arborist-templates/tools/$name.json" dst="$HOME/.arborist/tools/$name.json"
   if command -v "$name" >/dev/null 2>&1; then
     if [ -e "$dst" ]; then
-      echo "  · $name：已安装、已登记（$dst）"
+      echo "  · ${name}：已安装、已登记（${dst}）"
     elif [ -t 0 ] && [ -f "$tpl" ]; then
       read -r -p "  · $name 已安装，登记进 ~/.arborist/tools/？[y/N] " ans || true
       case "$ans" in
@@ -433,19 +433,19 @@ offer_tool() { # $1=命令名 $2=装法 $3=fallback
         *)   echo "    跳过登记；缺席时兜底：$fb";;
       esac
     elif [ -f "$tpl" ]; then
-      echo "  · $name：已安装、未登记（非交互）。手动登记：cp $tpl $dst 并填实况"
+      echo "  · ${name}：已安装、未登记（非交互）。手动登记：cp $tpl $dst 并填实况"
     else
-      echo "  · $name：已安装（无模板；要登记按 guide §2 手写 tool.json）"
+      echo "  · ${name}：已安装（无模板；要登记按 guide §2 手写 tool.json）"
     fi
   else
     if [ -t 0 ]; then
       read -r -p "  · $name 未安装，需要吗？（只给装法，不代装）[y/N] " ans || true
       case "$ans" in
-        y|Y) echo "    装法：$how；装好后重跑 adopt.sh 或按 guide §2 登记";;
+        y|Y) echo "    装法：${how}；装好后重跑 adopt.sh 或按 guide §2 登记";;
         *)   echo "    好——兜底：$fb";;
       esac
     else
-      echo "  · $name：未安装（非交互）。装法：$how；兜底：$fb"
+      echo "  · ${name}：未安装（非交互）。装法：${how}；兜底：$fb"
     fi
   fi
 }
