@@ -891,6 +891,12 @@ class MirrorRegistration(NamedTuple):
 FOREIGN_REGISTRATION_FIELD = "foreign_repo_registration"
 FOREIGN_REGISTRATION_REQUIRED = ("home_registry", "reason", "authorized_by")
 
+# Cited from every surface that can name the facility (--help, the unresolved-name
+# raise site). Named without a directory prefix on purpose: the guide sits at a
+# different path in an adopted copy than in the authority tree, and a prefix that
+# is wrong in half the installs is worse than none.
+REGISTRY_GUIDE_MIRROR_SECTION = "agenttui-registry.md §2.2.2"
+
 # Runtime fields that *address* the target: a stale value here sends the envelope
 # somewhere. `session_id` addresses the resume route, `pane_ref` the pane route,
 # and `session_file` is the probe every reachability decision is derived from, so
@@ -1018,6 +1024,24 @@ def load_agent(repo: Path, name: str) -> AgentRecord:
     leaf = repo / ".arborist" / "agents" / name
     spec_path = leaf / "spec.json"
     runtime_path = leaf / "runtime.json"
+    # A wholly absent leaf and a leaf missing one file are different readings, and
+    # only the first has a second legitimate cause: the agent is real but lives in
+    # another project. Left to the generic "missing registry file" the caller sees
+    # a filesystem fact and no mechanism, so the observed next move is to give up
+    # or to route by hand — both worse than the facility that already exists. The
+    # cross-repo form is nameable only here, at the moment the name fails to
+    # resolve, which is why the hint is a raise site rather than a doc line.
+    if not leaf.is_dir():
+        raise RegistryError(
+            f"no agent named {name!r} is registered in {repo} "
+            f"(expected leaf directory {leaf}). Two causes: it has never "
+            "self-registered here, or it is registered in ANOTHER project — "
+            "cross-project delivery is expressible only as a human-authorised "
+            f"mirror leaf in this repo (spec field {FOREIGN_REGISTRATION_FIELD}, "
+            f"required keys {', '.join(FOREIGN_REGISTRATION_REQUIRED)}; see "
+            f"{REGISTRY_GUIDE_MIRROR_SECTION}). The mirror supplies the name only: "
+            "every addressing value is read from the home leaf on each delivery"
+        )
     spec = read_json(spec_path)
     runtime = read_json(runtime_path)
 
@@ -2690,9 +2714,39 @@ def wait_for_transcript_marker(
         delay = min(delay * 2, PANE_VERIFY_POLL_MAX_SECONDS)
 
 
+# Printed by `--help` at both levels. A facility discoverable only by reading the
+# source is, for every caller who does not, indistinguishable from one that does
+# not exist: the measured consequence was a sender concluding cross-project
+# delivery was unsupported while the mechanism sat implemented and specified.
+CROSS_PROJECT_HELP = f"""cross-project delivery:
+  Every command resolves names inside ONE repository (--repo). To reach an agent
+  whose home is another project, give this repo an authorised mirror leaf for it
+  under .arborist/agents/<name>/spec.json:
+
+      "{FOREIGN_REGISTRATION_FIELD}": {{
+        "home_registry": "<absolute path to the home leaf DIRECTORY>",
+        "reason":        "<why this repo may address that agent>",
+        "authorized_by": "<who authorised it>"
+      }}
+
+  All three keys are required, and the declaration is what makes the leaf a
+  mirror. The mirror supplies the NAME only: on every delivery the addressing
+  half (session_id / session_file / pane_ref / state) is re-read from the home
+  leaf, and the mirror's own runtime.json is demoted to diagnostics. That is why
+  a mirror cannot deliver into a stale pane -- and why a home leaf that is
+  missing, renamed, or a mirror itself fails closed instead of falling back to
+  the local copy.
+
+  Spec: {REGISTRY_GUIDE_MIRROR_SECTION}. Validator check 7 reports mirror-stale /
+  mirror-declaration-incomplete / mirror-home-unreachable / mirror-home-mismatch.
+"""
+
+
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="AgentTUI registry lifecycle and cross-brand direct messaging"
+        description="AgentTUI registry lifecycle and cross-brand direct messaging",
+        epilog=CROSS_PROJECT_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--repo",
@@ -2710,9 +2764,39 @@ def create_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    send = subparsers.add_parser("send", help="direct-message a registered peer")
-    send.add_argument("--from", dest="sender", required=True)
-    send.add_argument("--to", dest="target", required=True)
+    send = subparsers.add_parser(
+        "send",
+        help="direct-message a registered peer",
+        description=(
+            "Direct-message a peer registered in --repo. Both endpoints are "
+            "resolved inside that one repository: there is no repo-crossing "
+            "parameter, so see --to for how a peer in another project is named."
+        ),
+        epilog=CROSS_PROJECT_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    send.add_argument(
+        "--from",
+        dest="sender",
+        required=True,
+        help=(
+            "the sending agent's leaf name in this repo. Accepts the "
+            "'<project_id>.<name>' form too, and verifies the qualifier against "
+            "the leaf actually loaded rather than trusting it"
+        ),
+    )
+    send.add_argument(
+        "--to",
+        dest="target",
+        required=True,
+        help=(
+            "the target agent's leaf name in this repo, bare or "
+            "'<project_id>.<name>'. A target whose home is ANOTHER project is "
+            "still named here: register a human-authorised mirror leaf for it in "
+            f"this repo ({FOREIGN_REGISTRATION_FIELD}, see the epilog). A bare "
+            "name never means 'somewhere else' — it resolves locally or fails"
+        ),
+    )
     # `--message` and `--message-file` are deliberately BOTH offered, and the file
     # form is the one to reach for when the body is anything but a short literal.
     #

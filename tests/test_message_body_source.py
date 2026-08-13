@@ -52,7 +52,10 @@ class MessageBodySourceTests(unittest.TestCase):
         (self.repo / ".trellis").mkdir(parents=True)
         self.repo_args = ["--repo", str(self.repo)]
 
-    LATER_LAYER = "missing registry file"
+    # 同一层（`load_agent`）的错误串。原值 "missing registry file" 是 leaf 目录
+    # 整个不存在时的报错；该分支后来被拆成「压根没注册」与「注册了但文件残缺」
+    # 两条读数,前者改口成下面这句。断言的层次没变,只是那一层换了措辞。
+    LATER_LAYER = "no agent named"
 
     def test_message_and_message_file_are_mutually_exclusive(self) -> None:
         """两个都给必须当场拒 —— 否则「哪个赢」会变成一个无人知道的默认。"""
