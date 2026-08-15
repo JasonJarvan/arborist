@@ -10,6 +10,7 @@
   "install": "`multica setup` / `multica login`",
   "fallback": "台账退化为本地 .trellis/tasks/ 目录 + sendbox 交办；WIMTB 退化为本地留档，不上台账",
   "availability": "`multica auth status` 通过",
+  "availability_expect": "正文**不得**含 `invalid token` / `401` / `Run 'multica login'`。**已实测:token 失效时 `multica auth status` 仍以 rc=0 退出** —— 只读退出码会把一个空台账报成可用。",
   "auth": "`multica login`；workspace 经 env `MULTICA_WORKSPACE_ID`；凭据不入表",
   "notes": "<workspace/project 具体 ID 进这里，不进 guide>；只读候选：issue get/list/search/runs/run-messages、project get/list；Trellis 接点：config.yaml hooks after_start/after_archive → scripts/trellis_multica_sync.py"
 }
