@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import textwrap
+import ast
 import io
 import json
 import contextlib
@@ -2149,15 +2151,48 @@ class TmuxTransportTests(unittest.TestCase):
             for forbidden in ("select-pane", "select-window", "focus"):
                 self.assertNotIn(forbidden, " ".join(argv))
 
-    def test_the_only_property_read_is_a_self_query_without_a_target(self) -> None:
-        # Mechanical: the banned command appears exactly once in the transport, in
-        # the self-query, and that call site passes no target.
-        source = inspect.getsource(AGENTTUI.TmuxTransport._own_session)
-        whole = inspect.getsource(AGENTTUI.TmuxTransport)
+    def test_every_display_message_call_site_is_a_self_query_without_a_target(self) -> None:
+        """`display-message` is only admissible as a *self*-query (no `-t`).
 
-        self.assertIn("display-message", source)
-        self.assertNotIn('"-t"', source)
-        self.assertEqual(1, whole.count('"display-message"'))
+        Why the shape changed: this check used to assert the string appeared
+        **exactly once** in the transport. That count was a *proxy* for the real
+        property, and it was enumerative — adding a second, equally legitimate
+        self-query (own-pane self-report) broke it while violating nothing. Bumping
+        the number to 2 would have kept the proxy and merely re-tuned it, i.e. moved
+        the enumeration rather than removed it.
+
+        So the property is checked directly: parse the transport, find every argv
+        list that mentions the banned command, and require that none of them carries
+        a target flag. That admits any number of self-queries and still refuses the
+        one thing the rule is about — using it with `-t`, where its silent fallback
+        to the current pane makes a missing pane look present.
+        """
+        tree = ast.parse(textwrap.dedent(inspect.getsource(AGENTTUI.TmuxTransport)))
+
+        call_sites: list[list[str]] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.List, ast.Tuple)):
+                continue
+            literals = [
+                element.value
+                for element in node.elts
+                if isinstance(element, ast.Constant) and isinstance(element.value, str)
+            ]
+            if "display-message" in literals:
+                call_sites.append(literals)
+
+        # Not vacuous: if the parse found nothing, the check proves nothing.
+        self.assertTrue(
+            call_sites,
+            "no display-message argv found — the check would pass vacuously",
+        )
+        for literals in call_sites:
+            self.assertNotIn(
+                "-t", literals,
+                f"display-message used with a target: {literals!r} — with `-t` it "
+                f"silently falls back to the current pane, which makes a missing "
+                f"pane look present",
+            )
 
     def test_a_missing_pane_is_refused_with_zero_injection_commands(self) -> None:
         transport, runner = self.transport(
