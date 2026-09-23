@@ -20,7 +20,7 @@ case "$cmd" in
       mkdir -p "$STAGING/$(dirname "$rel")"; cp "$INSTANCE_ROOT/$rel" "$STAGING/$rel"
       sed -i -e "s#$INSTANCE_ABS#<REPO_ROOT>#g" -e "s/\\b$PROJECT\\b/<project>/g" -e "s#$HOME#<HOME>#g" "$STAGING/$rel"
     done
-    echo "generalized -> $STAGING（下一步：Agent 跑 audit + diff vs $ARBORIST_ROOT/overlay）" ;;
+    echo "generalized -> ${STAGING}（下一步：Agent 跑 audit + diff vs $ARBORIST_ROOT/overlay）" ;;
   specialize)
     _need ARBORIST_ROOT INSTANCE_ROOT INSTANCE_ABS PROJECT
     rm -rf "$STAGING"; mkdir -p "$STAGING"
@@ -28,7 +28,7 @@ case "$cmd" in
       mkdir -p "$STAGING/$(dirname "$rel")"; cp "$ARBORIST_ROOT/overlay/$rel" "$STAGING/$rel"
       sed -i -e "s#<REPO_ROOT>#$INSTANCE_ABS#g" -e "s/<project>/$PROJECT/g" -e "s#<HOME>#$HOME#g" "$STAGING/$rel"
     done
-    echo "specialized -> $STAGING（下一步：Agent diff vs $INSTANCE_ROOT/.trellis/spec + 冲突调解）" ;;
+    echo "specialized -> ${STAGING}（下一步：Agent diff vs $INSTANCE_ROOT/.trellis/spec + 冲突调解）" ;;
   audit)
     dir="${1:?给目录}"; hits=0
     echo "== 绝对 home 路径 =="; grep -rnE "/home/|/Users/" "$dir" && hits=1 || echo "  clean"

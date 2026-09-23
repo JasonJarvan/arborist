@@ -59,28 +59,28 @@ link_one() {
 
   # 主树里源不存在 → 没什么可链，跳过（不同项目 harness 目录集可能有出入）。
   if [ ! -e "$src" ]; then
-    echo "  · $name：主树无此目录，跳过"
+    echo "  · ${name}：主树无此目录，跳过"
     return 0
   fi
 
   if [ -L "$dst" ]; then
     # 已是 symlink：解析后与源同 → no-op；否则重指。
     if [ "$(readlink -f "$dst" 2>/dev/null || true)" = "$(readlink -f "$src")" ]; then
-      echo "  · $name：已正确链接，no-op"
+      echo "  · ${name}：已正确链接，no-op"
       noop=$((noop+1))
     else
       rm "$dst"
       ln -s "$src" "$dst"
-      echo "  ↻ $name：旧链接重指 → $src"
+      echo "  ↻ ${name}：旧链接重指 → $src"
       relinked=$((relinked+1))
     fi
   elif [ -e "$dst" ]; then
     # worktree 里是真目录/真文件：不覆盖，告警跳过（避免吞掉 worktree 本地内容）。
-    echo "  ⚠ $name：worktree 内已存在真实目录/文件，未覆盖（如需 link 请人工确认后移除）" >&2
+    echo "  ⚠ ${name}：worktree 内已存在真实目录/文件，未覆盖（如需 link 请人工确认后移除）" >&2
     skipped=$((skipped+1))
   else
     ln -s "$src" "$dst"
-    echo "  ✓ $name：新建链接 → $src"
+    echo "  ✓ ${name}：新建链接 → $src"
     created=$((created+1))
   fi
 }
