@@ -12,6 +12,7 @@
   "install": "从其发布渠道安装二进制；`agentsview serve` 启动",
   "fallback": "无历史 agent 检索能力 → 退回手翻本地 journal / 各 brand 会话目录（如 ~/.claude/projects/）",
   "availability": "`agentsview serve status` 输出 running（兜底：端口 LISTEN / 进程 `agentsview serve`）",
+  "availability_expect": "正文出现 `running at http://<host>:<port>` 与 pid;正文说未运行即判不可用,**不以退出码为准**。",
   "auth": "可选 `serve --require-auth`（bearer）；远程 CLI 用 `--server <url> --server-token-file <file>`；凭据不入表",
   "notes": "<版本/二进制位置>；只读主力：session list/search/get/messages/tool-calls/export、projects、stats、openapi、mcp；写命令（sync/prune/import/secrets scan/pg push）勿经注册表调用"
 }
