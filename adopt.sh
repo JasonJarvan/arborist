@@ -7,11 +7,18 @@ ARBORIST_ROOT="$(cd "$(dirname "$0")" && pwd)"
 SRC="$ARBORIST_ROOT/overlay"
 BRAND_INSTALLER="$ARBORIST_ROOT/scripts/install-brand-compat.py"
 BRAND_VALIDATOR="$ARBORIST_ROOT/scripts/validate_brand_compat.py"
+CODEX_DISPATCH_CONFIGURATOR="$ARBORIST_ROOT/scripts/set_trellis_codex_dispatch.py"
 BRAND_PROJECT_SOURCE="$ARBORIST_ROOT/overlay/project-instructions/brand-compat.md"
 BRAND_WORKFLOW_SOURCE="$ARBORIST_ROOT/overlay/workflow-phase-index-brand-compat.md"
 ROOT="$(pwd)"
 [ -d "$ROOT/.trellis" ] || { echo "✗ 未见 .trellis/ —— 先 trellis init"; exit 1; }
 [ -d "$ROOT/.git" ] || { echo "✗ 不是 git 仓根"; exit 1; }
+
+# Trellis 的 Codex dispatch mode 目前只有 project-level 配置，没有受支持的
+# user/global fallback。Arborist 的机器级默认因此在 adopt 边界落地：不改 npm 包，
+# 不依赖当前 PATH 里的 Trellis 版本，且每次重跑都幂等收敛现有项目。
+echo "→ Codex dispatch 默认设为 sub-agent"
+python3 "$CODEX_DISPATCH_CONFIGURATOR" "$ROOT/.trellis/config.yaml"
 
 # required 依赖检查（Trellis / Superpowers）：缺失 = harness 不完整 → 醒目告警 + 给装法，不中断铺设。
 # 见 overlay/spec/guides/tool-registry.md §2.5。
@@ -425,7 +432,7 @@ offer_tool() { # $1=命令名 $2=装法 $3=fallback
   local tpl="$SRC/arborist-templates/tools/$name.json" dst="$HOME/.arborist/tools/$name.json"
   if command -v "$name" >/dev/null 2>&1; then
     if [ -e "$dst" ]; then
-      echo "  · $name：已安装、已登记（$dst）"
+      echo "  · ${name}：已安装、已登记（$dst）"
     elif [ -t 0 ] && [ -f "$tpl" ]; then
       read -r -p "  · $name 已安装，登记进 ~/.arborist/tools/？[y/N] " ans || true
       case "$ans" in
@@ -433,19 +440,19 @@ offer_tool() { # $1=命令名 $2=装法 $3=fallback
         *)   echo "    跳过登记；缺席时兜底：$fb";;
       esac
     elif [ -f "$tpl" ]; then
-      echo "  · $name：已安装、未登记（非交互）。手动登记：cp $tpl $dst 并填实况"
+      echo "  · ${name}：已安装、未登记（非交互）。手动登记：cp $tpl $dst 并填实况"
     else
-      echo "  · $name：已安装（无模板；要登记按 guide §2 手写 tool.json）"
+      echo "  · ${name}：已安装（无模板；要登记按 guide §2 手写 tool.json）"
     fi
   else
     if [ -t 0 ]; then
       read -r -p "  · $name 未安装，需要吗？（只给装法，不代装）[y/N] " ans || true
       case "$ans" in
-        y|Y) echo "    装法：$how；装好后重跑 adopt.sh 或按 guide §2 登记";;
+        y|Y) echo "    装法：${how}；装好后重跑 adopt.sh 或按 guide §2 登记";;
         *)   echo "    好——兜底：$fb";;
       esac
     else
-      echo "  · $name：未安装（非交互）。装法：$how；兜底：$fb"
+      echo "  · ${name}：未安装（非交互）。装法：${how}；兜底：$fb"
     fi
   fi
 }
